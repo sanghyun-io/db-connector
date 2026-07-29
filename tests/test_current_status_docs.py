@@ -1295,3 +1295,27 @@ def test_current_status_records_anonymous_error_reporting_implementation_plan():
     assert "Deleted the exposed Reporter key" in sessions
     assert "Removed the unused `GH_APP_PRIVATE_KEY` repository secret" in sessions
     assert "Closed TF-STATUS-092 after protected PR #245 merged" in sessions
+
+
+def test_current_status_tracks_242_mysql_export_fallback_release_closure():
+    doc = (PROJECT_ROOT / "docs" / "current_status.md").read_text(encoding="utf-8")
+    summary = " ".join(_section(doc, "Summary").split())
+    tracker = " ".join(_section(doc, "Issue Tracker").split())
+    verification = " ".join(_section(doc, "Verification Log").split())
+    order = " ".join(_section(doc, "Recommended Execution Order").split())
+    sessions = " ".join(_section(doc, "Session Log").split())
+
+    assert "stable/latest `v2.4.2` release" in summary
+    assert "TF-STATUS-097 is `closed`" in summary
+    assert "TF-STATUS-097 | High | closed" in tracker
+    assert "PR #253" in verification
+    assert "30418651877" in verification
+    assert "30418651961" in verification
+    assert "1d9305c826f11ebe6c808ec501953ed1339152d9" in verification
+    assert "30419408852" in verification
+    assert "30419463951" in verification
+    assert "10/10 assets have GitHub digests" in verification
+    assert "four macOS sidecars match" in verification
+    assert "UpdateChecker" in verification
+    assert "Keep TF-STATUS-097 closed" in order
+    assert "Published `v2.4.2` as stable/latest" in sessions

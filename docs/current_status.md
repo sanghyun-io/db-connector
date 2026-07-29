@@ -99,11 +99,15 @@ build pass. A real limited-privilege/provider endpoint and the monolithic Python
 suite remain broader verification gaps; the latter exceeded ten minutes on
 this Windows session even though the 173-test focused gate passed.
 
-TF-STATUS-097 is `in_progress` for the `2.4.2` patch release containing this
-fallback. The Python package, application, and Windows installer versions are
-aligned at `2.4.2`. Protected PR checks, exact-current-main tag approval,
-multi-platform release build, asset digest inspection, stable publication, and
-updater visibility remain required before closure.
+The stable/latest `v2.4.2` release now contains the TF-STATUS-096 fallback.
+Protected PR #253 passed the full Python, Rust Core, version, support-tracking,
+and internal/external macOS arm64/x86_64 gates before merging at exact main
+commit `1d9305c826f11ebe6c808ec501953ed1339152d9`. Approved tag run
+`30419408852` created annotated `v2.4.2` at that commit, and approved release
+run `30419463951` built and verified Windows plus unsigned macOS arm64/x86_64
+artifacts. All 10 release assets expose GitHub SHA-256 digests, the four macOS
+sidecars match their corresponding DMG/ZIP asset digests, and the live updater
+reports `2.4.2` without error. TF-STATUS-097 is `closed`.
 
 The `2.3.1` release candidate now contains the completed release-trust scope:
 GitHub Release asset `digest` verification prevents unverified downloaded
@@ -747,6 +751,7 @@ Commands run locally:
 
 | Date | Scope | Command | Result | Notes |
 | --- | --- | --- | --- | --- |
+| 2026-07-29 | `v2.4.2` protected publication closure / TF-STATUS-097 | PR #253 protected checks and merge; approved `create-release-tag.yml` run `30419408852`; approved `release.yml` run `30419463951`; annotated tag peel; draft asset/digest and macOS sidecar inspection; stable/latest publication; live `UpdateChecker` | PR runs `30418651877` and `30418651961` passed full Python, Rust Core, version, support-tracking, and internal/external macOS arm64/x86_64 gates; merge commit `1d9305c826f11ebe6c808ec501953ed1339152d9`; tag peels to that exact commit; release run passed Windows and unsigned macOS builds plus artifact verification; 10/10 assets have GitHub digests; four macOS sidecars match; public updater returned `2.4.2` with no error | `v2.4.2` is stable/latest at `https://github.com/sanghyun-io/tunnelforge/releases/tag/v2.4.2`. TF-STATUS-097 is closed. TF-STATUS-096 remains `fixed_pending_full_verify` only for a disposable live limited-account/provider proof. |
 | 2026-07-29 | `2.4.2` local release-candidate gate / TF-STATUS-097 | `scripts/bump_version.py --bump-type patch`; focused Export/UI/i18n/status/version-sync pytest command; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; `git diff --check`; clean monolithic `.venv\Scripts\python.exe -m pytest -q` attempt | Version sources aligned at `2.4.2`; focused Python 174 passed; Cargo 228 unit + 2 JSONL CLI + 10 live-configurable + 2 stress passed / 1 manual stress ignored; release build and diff check passed; monolithic Windows pytest remained non-terminal after five minutes | The earlier apparent stop at a config backup test was not reproducible: that test passed alone and all 60 config-manager tests passed together. Local publication uses the same split-gate precedent as `v2.4.1`; the protected GitHub `python-regression` full-suite job remains mandatory and will block merge on any real failure. |
 | 2026-07-29 | TF-STATUS-096 privilege-aware parallel Export fallback implementation | TDD-focused Rust/Python/UI tests; `.venv\Scripts\python.exe -m pytest tests\test_rust_dump_exporter.py tests\test_rust_dump_worker.py tests\test_db_export_dialog.py tests\test_i18n.py tests\test_current_status_docs.py -q`; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; monolithic `.venv\Scripts\python.exe -m pytest -q`; `cargo fmt --manifest-path migration_core\Cargo.toml -- --check` | Focused Python 173 passed; Cargo 228 unit + 2 JSONL CLI + 10 live-configurable + 2 stress passed / 1 manual stress ignored; release build passed; monolithic Python timed out after 10 minutes without a terminal result; fmt check reports repository-wide pre-existing format drift | Stable marker handling is limited to MySQL access-denial codes 1045/1142/1227; real lock timeout remains distinct. Single-connection mode uses one `REPEATABLE READ`, read-only consistent snapshot with no global/backup lock, forces one worker, and re-inspects selected schema for DDL drift. UI shows recommended continuation, exact privilege guidance, or cancel and does not re-prompt if fallback itself fails. No production DB mutation or live limited-account verification was performed. |
 | 2026-07-29 | TF-STATUS-096 MySQL Export access-denial investigation | Screenshot/error-code inspection; backward trace through `RustDumpExportDialog` -> `RustDumpWorker` -> `RustDumpExporter` -> Rust `dump.run`; `git show 8aa2de4`; source/test/status searches; local configuration shape and application-log inspection; MySQL 8.4 reference comparison; `.venv\Scripts\python.exe -m pytest tests\test_current_status_docs.py -q`; `git diff --check` | CONFIRMED product compatibility/diagnostic gap; 72 status-contract tests passed; diff check passed; exact upstream policy remains environment-dependent | `MysqlSharedSnapshot::acquire` opens coordinator/control/worker sessions, successfully runs coordinator session setup and `SELECT CONNECTION_ID()`, then wraps every `FLUSH TABLES WITH READ LOCK` failure as a two-second acquisition failure. MySQL Export always takes this path even with one worker and later requires `BACKUP_ADMIN`. Official MySQL semantics require global `FLUSH_TABLES` or `RELOAD` for the first statement and `BACKUP_ADMIN` for `LOCK INSTANCE FOR BACKUP`; standard MySQL privilege denial is normally error 1227, while the observed 1045 after successful coordinator queries suggests a provider/proxy/nonstandard policy response that must be identified from server version/comment, `CURRENT_USER()`, and grants. Existing live coverage uses one configured administrative endpoint and has no limited-privilege or proxy/provider matrix. No production DB mutation was performed. |
@@ -2576,7 +2581,7 @@ Next action:
 
 ### TF-STATUS-097: `v2.4.2` MySQL Export Fallback Publication
 
-Status: `in_progress`
+Status: `closed`
 Severity: High
 Area: Release readiness / `2.4.2` publication
 
@@ -2589,14 +2594,24 @@ Evidence:
   translations, and canonical design/status documentation.
 - The repository requires protected PR checks, an exact-current-main approved
   annotated tag, and a separately approved multi-platform release workflow.
+- PR #253 passed `python-regression`, Rust Core, terminal version,
+  support-tracking, and both internal/external macOS arm64/x86_64 checks before
+  merging as `1d9305c826f11ebe6c808ec501953ed1339152d9`.
+- Approved run `30419408852` created annotated `v2.4.2` at that exact current
+  main commit. Approved run `30419463951` validated the tag, built Windows and
+  unsigned macOS arm64/x86_64 packages, verified normalized release artifacts,
+  and created the release.
+- The stable/latest release contains exactly 10 assets with GitHub SHA-256
+  digests. All four macOS checksum sidecars match their corresponding DMG/ZIP
+  asset digests.
+- Public `UpdateChecker` returned current/latest `2.4.2`, the stable release
+  URL, and no error.
 
 Next action:
 
-1. Complete local release-candidate gates and protected PR checks.
-2. Merge through branch protection, approve the exact-main `v2.4.2` tag, and
-   run the separate approved Build and Release workflow.
-3. Inspect all expected assets and digests, confirm stable/latest and updater
-   visibility, then close TF-STATUS-097 in a follow-up status change.
+1. Keep `v2.4.2` stable/latest and retain the protected PR, exact-main tag,
+   separate approval, asset digest, and updater verification sequence for later
+   releases.
 
 ## Issue Tracker
 
@@ -2698,16 +2713,17 @@ Next action:
 | TF-STATUS-094 | High | closed | Rust Core dump.import / Import UI | Over-broad target-only FK preflight blocked MySQL-like dump-scoped restore | Preserve compatible target-only tables and report operation-level failures once |
 | TF-STATUS-095 | High | closed | Release readiness / `2.4.1` publication | MySQL shared-snapshot and dump-scoped import fixes required protected publication | Keep `v2.4.1` stable/latest and retain protected release gates |
 | TF-STATUS-096 | High | fixed_pending_full_verify | Rust Core dump.run / Export UI | Privilege-aware one-connection fallback implemented; live limited-account/provider proof remains | Run disposable limited-account/provider UI coverage and obtain a terminal clean full-Python result |
-| TF-STATUS-097 | High | in_progress | Release readiness / `2.4.2` publication | MySQL Export privilege fallback requires protected patch publication | Pass protected PR checks, create exact-main approved tag, publish verified assets, and confirm updater visibility |
+| TF-STATUS-097 | High | closed | Release readiness / `2.4.2` publication | MySQL Export privilege fallback required protected patch publication | Keep `v2.4.2` stable/latest and retain exact-main protected release evidence |
 
 ## Recommended Execution Order
 
-1. Publish TF-STATUS-097 through the protected `v2.4.2` PR, exact-main tag,
-   approved build, asset verification, and updater sequence.
-2. Finish TF-STATUS-096 verification with a disposable limited-account/provider
+1. Finish TF-STATUS-096 verification with a disposable limited-account/provider
    UI run and a terminal clean full-Python result. Preserve explicit opt-in,
    schema-drift rejection, and the distinction between access denial and lock
    timeout.
+2. Keep TF-STATUS-097 closed by preserving the protected `v2.4.2` PR,
+   exact-main tag, approved build, 10-asset digest verification, and updater
+   evidence.
 3. Keep TF-STATUS-094/095 closed by preserving compatible target-only FK
    tables, bounded shared-snapshot lock behavior, exact-main release tags,
    verified assets, and updater visibility.
@@ -2771,6 +2787,7 @@ Next action:
 
 | Date | Session Summary | Files Touched | Verification |
 | --- | --- | --- | --- |
+| 2026-07-29 | Published `v2.4.2` as stable/latest and closed TF-STATUS-097 after the complete protected PR, exact-main tag, approved multi-platform build, asset inspection, and updater verification sequence. | PR #253, tag `v2.4.2`, release workflow/metadata, canonical status | Runs `30418651877` and `30418651961` passed; merge commit `1d9305c826f11ebe6c808ec501953ed1339152d9`; tag run `30419408852` and release run `30419463951` passed; 10/10 assets have GitHub digests and four macOS sidecars match; public latest and `UpdateChecker` return `2.4.2`. |
 | 2026-07-29 | Started the protected `v2.4.2` patch publication for TF-STATUS-096 and opened TF-STATUS-097. Synchronized the application, package, and installer versions and prepared the release candidate on a dedicated agent branch. | `src/version.py`, `pyproject.toml`, `installer/TunnelForge.iss`, canonical status | `scripts/bump_version.py --bump-type patch` reported `new_version=2.4.2`; focused Python 174, Cargo full, optimized build, and diff check passed. The clean monolithic Windows pytest remained non-terminal after five minutes, while the suspect test passed alone and its 60-test module passed; mandatory hosted full Python and protected publication gates remain |
 | 2026-07-29 | Implemented TF-STATUS-096. Strict parallel MySQL Export now identifies access-denied backup-lock failures, and the UI offers explicit recommended one-connection continuation, privilege guidance, or cancel. The fallback uses one read-only consistent-snapshot connection, forces one worker, records distinct manifest metadata, and rejects schema drift. It does not silently downgrade or re-prompt after a fallback failure. | Rust `dump.run`/manifest metadata, Python exporter/worker, Export dialog, legacy i18n, focused tests, design/plan docs, canonical status | TDD RED/GREEN; focused Python/UI/i18n/status 173 passed; complete Cargo test and release build passed; monolithic Python exceeded ten minutes without a terminal result; repository-wide fmt check exposed pre-existing drift; no production DB mutation or live limited-account/provider claim |
 | 2026-07-29 | Investigated a real MySQL Export failure and opened TF-STATUS-096. The immediate failure is a server-side denial of the mandatory global read lock after the coordinator session is already usable. The root product gap is that every MySQL Export now requires global backup privileges without preflight or a limited-account path, while the UI conflates privilege/policy denial with a two-second lock timeout. Product direction is now explicit: if selected parallel Export lacks the required capability, offer recommended one-connection continuation, exact privilege setup guidance/retry, or cancel; keep schema-drift protection internal. | `docs/current_status.md`, `tests/test_current_status_docs.py` | Screenshot/error trace, source/control-flow inspection, introducing commit and test audit, sanitized local config/log inspection, official MySQL privilege/error semantics review, 72 status-contract tests passed, and `git diff --check` passed; no production DB mutation |
