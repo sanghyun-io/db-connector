@@ -711,11 +711,15 @@ fn default_snapshot_policy() -> String {
 
 pub(crate) fn dump_manifest_consistency_metadata(
     engine: &str,
-    _threads: usize,
+    mysql_single_connection: bool,
 ) -> (String, bool, Vec<String>) {
     if engine == "mysql" {
         (
-            "mysql_shared_consistent_snapshot".to_string(),
+            if mysql_single_connection {
+                "mysql_single_connection_consistent_snapshot".to_string()
+            } else {
+                "mysql_shared_consistent_snapshot".to_string()
+            },
             true,
             Vec::new(),
         )
@@ -1043,7 +1047,7 @@ mod tests {
     #[test]
     fn dump_manifest_consistency_metadata_marks_mysql_parallel_as_shared_snapshot() {
         let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("mysql", 8);
+            dump_manifest_consistency_metadata("mysql", false);
 
         assert_eq!(snapshot_policy, "mysql_shared_consistent_snapshot");
         assert!(strict_export);
@@ -1053,7 +1057,7 @@ mod tests {
     #[test]
     fn dump_manifest_consistency_metadata_marks_single_thread_as_strict() {
         let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("mysql", 1);
+            dump_manifest_consistency_metadata("mysql", false);
 
         assert_eq!(snapshot_policy, "mysql_shared_consistent_snapshot");
         assert!(strict_export);
@@ -1061,9 +1065,22 @@ mod tests {
     }
 
     #[test]
+    fn dump_manifest_consistency_metadata_marks_mysql_single_connection() {
+        let (snapshot_policy, strict_export, warnings) =
+            dump_manifest_consistency_metadata("mysql", true);
+
+        assert_eq!(
+            snapshot_policy,
+            "mysql_single_connection_consistent_snapshot"
+        );
+        assert!(strict_export);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn dump_manifest_consistency_metadata_keeps_postgres_policy_separate() {
         let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("postgresql", 8);
+            dump_manifest_consistency_metadata("postgresql", false);
 
         assert_eq!(snapshot_policy, "connection_consistent");
         assert!(strict_export);

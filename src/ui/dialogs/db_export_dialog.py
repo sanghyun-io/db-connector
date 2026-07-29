@@ -26,7 +26,7 @@ from src.core.logger import get_logger
 from src.core.path_safety import safe_output_dir
 from src.exporters.rust_dump_exporter import (
     RustDumpChecker, build_rust_dump_config, check_rust_dump,
-    DEFAULT_DUMP_COMPRESSION
+    DEFAULT_DUMP_COMPRESSION, is_mysql_parallel_snapshot_privilege_error
 )
 from src.ui.dialogs.collapsible_config_dialog import CollapsibleConfigDialog
 from src.ui.workers.error_reporting_worker import ErrorReportingMixin
@@ -316,6 +316,7 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         self._error_report_workers: List[object] = []
         self._cancel_requested = False
         self._close_after_cancel = False
+        self._mysql_single_connection_fallback = False
 
         # 로그 수집용 변수
         self.log_entries: List[str] = []
@@ -1011,14 +1012,7 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         # 작업 스레드 시작
         self.worker = self._build_worker(schema, output_dir)
 
-        # 시그널 연결
-        self.worker.progress.connect(self.on_progress)
-        self.worker.table_progress.connect(self.on_table_progress)
-        self.worker.detail_progress.connect(self.on_detail_progress)
-        self.worker.table_status.connect(self.on_table_status)
-        self.worker.raw_output.connect(self.on_raw_output)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.start()
+        self._start_export_worker(self.worker)
 
     def _resolve_output_dir(self, schema: str) -> str:
         # 실행 시점 기준으로 출력 폴더를 재생성한다.
@@ -1053,26 +1047,111 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         self.btn_save_log.setEnabled(False)
         self._cancel_requested = False
         self._close_after_cancel = False
+        self._mysql_single_connection_fallback = False
 
-    def _build_worker(self, schema: str, output_dir: str):
+    def _build_worker(
+        self,
+        schema: str,
+        output_dir: str,
+        mysql_snapshot_mode: str = "parallel_strict",
+    ):
         config = build_rust_dump_config(self.connector)
+        threads = (
+            1 if mysql_snapshot_mode == "single_connection"
+            else self.spin_threads.value()
+        )
         if self.radio_full.isChecked():
             return RustDumpWorker(
                 "export_schema", config,
                 schema=schema,
                 output_dir=output_dir,
-                threads=self.spin_threads.value(),
-                compression=self.combo_compression.currentText()
+                threads=threads,
+                compression=self.combo_compression.currentText(),
+                mysql_snapshot_mode=mysql_snapshot_mode,
             )
         return RustDumpWorker(
             "export_tables", config,
             schema=schema,
             tables=self.get_selected_tables(),
             output_dir=output_dir,
-            threads=self.spin_threads.value(),
+            threads=threads,
             compression=self.combo_compression.currentText(),
-            include_fk_parents=self.chk_include_fk.isChecked()
+            include_fk_parents=self.chk_include_fk.isChecked(),
+            mysql_snapshot_mode=mysql_snapshot_mode,
         )
+
+    def _start_export_worker(self, worker: RustDumpWorker) -> None:
+        self.worker = worker
+        worker.progress.connect(self.on_progress)
+        worker.table_progress.connect(self.on_table_progress)
+        worker.detail_progress.connect(self.on_detail_progress)
+        worker.table_status.connect(self.on_table_status)
+        worker.raw_output.connect(self.on_raw_output)
+        worker.finished.connect(self.on_finished)
+        worker.start()
+
+    def _create_mysql_privilege_dialog(self) -> QMessageBox:
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Warning)
+        message_box.setWindowTitle("병렬 Export 권한 필요")
+        message_box.setText(
+            "병렬 Export에 필요한 MySQL 권한이 없습니다.\n\n"
+            "권한 없이 단일 연결로 안전하게 Export할 수 있지만 "
+            "병렬 처리는 사용되지 않습니다."
+        )
+        continue_button = message_box.addButton(
+            translate_text("단일 연결로 계속"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        continue_button.setObjectName("mysql_single_connection_continue")
+        guidance_button = message_box.addButton(
+            translate_text("권한 설정 안내"),
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        guidance_button.setObjectName("mysql_privilege_guidance")
+        cancel_button = message_box.addButton(
+            translate_text("취소"),
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        cancel_button.setObjectName("mysql_privilege_cancel")
+        message_box.setDefaultButton(continue_button)
+        message_box.setEscapeButton(cancel_button)
+        return message_box
+
+    def _prompt_mysql_privilege_action(self) -> str:
+        message_box = self._create_mysql_privilege_dialog()
+        message_box.exec()
+        clicked = message_box.clickedButton()
+        object_name = clicked.objectName() if clicked is not None else ""
+        return {
+            "mysql_single_connection_continue": "continue",
+            "mysql_privilege_guidance": "guidance",
+        }.get(object_name, "cancel")
+
+    def _show_mysql_privilege_guidance(self) -> None:
+        QMessageBox.information(
+            self,
+            "MySQL 병렬 Export 권한 설정",
+            "병렬 일관 스냅샷에는 다음 전역 권한이 필요합니다.\n\n"
+            "• FLUSH_TABLES 또는 RELOAD\n"
+            "• BACKUP_ADMIN\n\n"
+            "DBA에게 해당 권한을 요청한 뒤 Export를 다시 실행하세요.",
+        )
+
+    def _retry_with_single_connection(self) -> None:
+        self._mysql_single_connection_fallback = True
+        self._add_log(
+            "병렬 Export 권한 없음: 단일 연결 일관 스냅샷으로 다시 시도합니다."
+        )
+        self.set_ui_enabled(False)
+        self.collapse_config_section()
+        self.label_status.setText("단일 연결 일관 스냅샷으로 다시 시도 중...")
+        worker = self._build_worker(
+            self.export_schema,
+            self.input_output_dir.text(),
+            mysql_snapshot_mode="single_connection",
+        )
+        self._start_export_worker(worker)
 
     def _add_log(self, msg: str):
         """로그 항목 추가 (수집용)"""
@@ -1109,6 +1188,22 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
 
     def on_finished(self, success: bool, message: str):
         message = _escape_local_diagnostic_text(message)
+        handled_privilege_failure = False
+        if (
+            not success
+            and not self._mysql_single_connection_fallback
+            and is_mysql_parallel_snapshot_privilege_error(message)
+        ):
+            privilege_action = self._prompt_mysql_privilege_action()
+            if privilege_action == "continue":
+                self._retry_with_single_connection()
+                return
+            handled_privilege_failure = True
+            if privilege_action == "guidance":
+                self._show_mysql_privilege_guidance()
+            else:
+                self._add_log("병렬 Export 권한 안내에서 취소를 선택했습니다.")
+
         # 로그 기록
         self.export_end_time = datetime.now()
         self.export_success = success
@@ -1168,6 +1263,8 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
 
             if self._cancel_requested:
                 self._add_log("Export가 취소되었습니다.")
+            elif handled_privilege_failure:
+                self._add_log("병렬 Export 권한 부족으로 작업을 중단했습니다.")
             else:
                 QMessageBox.warning(self, "Export 실패", f"❌ {message}")
 
