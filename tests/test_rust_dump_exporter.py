@@ -203,6 +203,51 @@ class TestRustDumpExporter:
         assert facade.payload["compression"] == "zstd"
         assert "2" in msg
 
+    def test_export_full_schema_single_connection_forces_one_worker(self, tmp_path):
+        from src.exporters.rust_dump_exporter import RustDumpConfig, RustDumpExporter
+
+        class FakeFacade:
+            def run_dump(self, payload, on_event=None):
+                self.payload = payload
+                return {
+                    "success": True,
+                    "tables": 1,
+                    "rows_dumped": 2,
+                    "snapshot_policy": "mysql_single_connection_consistent_snapshot",
+                }
+
+        facade = FakeFacade()
+        exporter = RustDumpExporter(
+            RustDumpConfig("localhost", 3306, "root", "password"),
+            facade=facade,
+        )
+
+        success, message = exporter.export_full_schema(
+            "app",
+            str(tmp_path / "dump"),
+            threads=8,
+            mysql_snapshot_mode="single_connection",
+        )
+
+        assert success is True
+        assert facade.payload["threads"] == 1
+        assert facade.payload["mysql_snapshot_mode"] == "single_connection"
+        assert "단일 연결 일관 스냅샷" in message
+
+    def test_parallel_snapshot_privilege_marker_is_not_inferred_from_raw_1045(self):
+        from src.exporters.rust_dump_exporter import (
+            is_mysql_parallel_snapshot_privilege_error,
+        )
+
+        assert is_mysql_parallel_snapshot_privilege_error(
+            "Rust DB Core export 오류: "
+            "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED:"
+            "FLUSH_TABLES_OR_RELOAD:ERROR 1045"
+        )
+        assert not is_mysql_parallel_snapshot_privilege_error(
+            "mysql connection error: ERROR 1045 access denied"
+        )
+
     def test_export_full_schema_passes_zstd_compression_to_rust_dump(self, tmp_path):
         """압축 선택이 Rust dump.run payload로 전달됨"""
         from src.exporters.rust_dump_exporter import RustDumpConfig, RustDumpExporter

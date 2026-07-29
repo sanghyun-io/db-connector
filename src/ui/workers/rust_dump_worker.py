@@ -109,6 +109,9 @@ class RustDumpWorker(QThread):
             self._on_detail,
             self._on_table_status,
             self._on_raw_output,
+            mysql_snapshot_mode=self.kwargs.get(
+                'mysql_snapshot_mode', 'parallel_strict'
+            ),
         )
         success, msg = self._is_cancelled_message(success, msg)
         self.finished.emit(success, msg)
@@ -129,6 +132,9 @@ class RustDumpWorker(QThread):
             self._on_detail,
             self._on_table_status,
             self._on_raw_output,
+            mysql_snapshot_mode=self.kwargs.get(
+                'mysql_snapshot_mode', 'parallel_strict'
+            ),
         )
         success, msg = self._is_cancelled_message(success, msg)
         self.finished.emit(success, msg)

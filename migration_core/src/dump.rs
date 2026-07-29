@@ -14,12 +14,24 @@ use crate::*;
 /// dump.run / dump.import 요청에 threads가 명시되지 않았을 때 사용하는 기본 워커 수.
 pub(crate) const DEFAULT_DUMP_THREADS: usize = 8;
 const MYSQL_GLOBAL_READ_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED: &str =
+    "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlSnapshotMode {
+    ParallelStrict,
+    SingleConnection,
+}
 
 fn mysql_snapshot_worker_setup_sql() -> [&'static str; 2] {
     [
         "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
     ]
+}
+
+fn mysql_single_connection_setup_sql() -> [&'static str; 2] {
+    mysql_snapshot_worker_setup_sql()
 }
 
 fn mysql_snapshot_coordinator_sql() -> [&'static str; 4] {
@@ -31,8 +43,20 @@ fn mysql_snapshot_coordinator_sql() -> [&'static str; 4] {
     ]
 }
 
+fn mysql_parallel_privilege_error(err: &mysql::Error, privilege: &str) -> Option<String> {
+    let mysql::Error::MySqlError(server_error) = err else {
+        return None;
+    };
+    if !matches!(server_error.code, 1045 | 1142 | 1227) {
+        return None;
+    }
+    Some(format!(
+        "{MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED}:{privilege}:{server_error}"
+    ))
+}
+
 struct MysqlSharedSnapshot {
-    coordinator: mysql::PooledConn,
+    coordinator: Option<mysql::PooledConn>,
     workers: Vec<mysql::PooledConn>,
     setup_ms: u64,
 }
@@ -70,11 +94,14 @@ impl MysqlSharedSnapshot {
         let global_lock_result = coordinator.query_drop(global_lock_sql);
         let _ = cancel_tx.send(());
         let _ = watchdog.join();
-        global_lock_result.map_err(|err| {
-            format!(
-                "mysql consistent snapshot could not acquire the brief global read lock within 2 seconds: {err}"
-            )
-        })?;
+        if let Err(err) = global_lock_result {
+            return Err(mysql_parallel_privilege_error(&err, "FLUSH_TABLES_OR_RELOAD")
+                .unwrap_or_else(|| {
+                    format!(
+                        "mysql consistent snapshot could not acquire the brief global read lock within 2 seconds: {err}"
+                    )
+                }));
+        }
 
         let setup_result = (|| -> Result<(), String> {
             for worker in &mut workers {
@@ -83,9 +110,11 @@ impl MysqlSharedSnapshot {
                 })?;
             }
             coordinator.query_drop(backup_lock_sql).map_err(|err| {
-                format!(
-                    "mysql backup lock failed; BACKUP_ADMIN is required for a safe online export: {err}"
-                )
+                mysql_parallel_privilege_error(&err, "BACKUP_ADMIN").unwrap_or_else(|| {
+                    format!(
+                        "mysql backup lock failed; BACKUP_ADMIN is required for a safe online export: {err}"
+                    )
+                })
             })?;
             coordinator
                 .query_drop(unlock_tables_sql)
@@ -102,8 +131,23 @@ impl MysqlSharedSnapshot {
         }
 
         Ok(Self {
-            coordinator,
+            coordinator: Some(coordinator),
             workers,
+            setup_ms: started.elapsed().as_millis().max(1) as u64,
+        })
+    }
+
+    fn acquire_single_connection(endpoint: &Endpoint) -> Result<Self, String> {
+        let started = Instant::now();
+        let mut worker = mysql_connection(endpoint)?;
+        for sql in mysql_single_connection_setup_sql() {
+            worker
+                .query_drop(sql)
+                .map_err(|err| format!("mysql single-connection snapshot setup failed: {err}"))?;
+        }
+        Ok(Self {
+            coordinator: None,
+            workers: vec![worker],
             setup_ms: started.elapsed().as_millis().max(1) as u64,
         })
     }
@@ -160,9 +204,15 @@ impl Drop for MysqlSharedSnapshot {
         for worker in &mut self.workers {
             let _ = worker.query_drop("ROLLBACK");
         }
-        let _ = self.coordinator.query_drop("UNLOCK TABLES");
-        let _ = self.coordinator.query_drop("UNLOCK INSTANCE");
+        if let Some(coordinator) = self.coordinator.as_mut() {
+            let _ = coordinator.query_drop("UNLOCK TABLES");
+            let _ = coordinator.query_drop("UNLOCK INSTANCE");
+        }
     }
+}
+
+fn mysql_schema_drifted(before: &NormalizedSchema, after: &NormalizedSchema) -> bool {
+    before != after
 }
 
 fn mysql_connection(endpoint: &Endpoint) -> Result<mysql::PooledConn, String> {
@@ -447,6 +497,7 @@ pub(crate) fn dump_import_row_progress_event(
 }
 
 /// dump.run 요청 payload에서 파싱·검증한 옵션 묶음.
+#[derive(Debug)]
 struct DumpRunOptions {
     output_dir: String,
     chunk_size: usize,
@@ -455,6 +506,7 @@ struct DumpRunOptions {
     selected_tables: Vec<String>,
     data_format: String,
     compression: String,
+    mysql_snapshot_mode: MysqlSnapshotMode,
 }
 
 fn parse_dump_run_options(request: &Request) -> Result<DumpRunOptions, String> {
@@ -503,6 +555,18 @@ fn parse_dump_run_options(request: &Request) -> Result<DumpRunOptions, String> {
     if !matches!(compression.as_str(), "none" | "zstd") {
         return Err(format!("unsupported dump compression: {compression}"));
     }
+    let mysql_snapshot_mode = match request
+        .payload
+        .get("mysql_snapshot_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("parallel_strict")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "parallel_strict" => MysqlSnapshotMode::ParallelStrict,
+        "single_connection" => MysqlSnapshotMode::SingleConnection,
+        other => return Err(format!("unsupported mysql_snapshot_mode: {other}")),
+    };
     Ok(DumpRunOptions {
         output_dir,
         chunk_size,
@@ -511,6 +575,7 @@ fn parse_dump_run_options(request: &Request) -> Result<DumpRunOptions, String> {
         selected_tables,
         data_format,
         compression,
+        mysql_snapshot_mode,
     })
 }
 
@@ -570,7 +635,10 @@ fn finalize_dump_manifest<F: FnMut(Value)>(
     };
     let views_count = views.len();
     let (snapshot_policy, strict_export, manifest_warnings) =
-        dump_manifest_consistency_metadata(&endpoint.engine, options.threads);
+        dump_manifest_consistency_metadata(
+            &endpoint.engine,
+            options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection,
+        );
 
     let manifest = DumpManifest {
         format: "tunnelforge-dump".to_string(),
@@ -599,23 +667,52 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
     let output_path = Path::new(&options.output_dir);
     prepare_dump_output_dir(output_path, options.overwrite)?;
 
+    let effective_threads = if endpoint.engine == "mysql"
+        && options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection
+    {
+        1
+    } else {
+        options.threads
+    };
     let mut mysql_snapshot = if endpoint.engine == "mysql" {
         emit(json!({
             "event": "phase",
             "request_id": request.request_id,
             "phase": "snapshot",
-            "message": "공유 일관 스냅샷 준비 중 (쓰기 잠금은 최대 2초 내 획득 후 즉시 해제)"
+            "message": if options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection {
+                "단일 연결 일관 스냅샷 준비 중 (관리 권한 불필요)"
+            } else {
+                "공유 일관 스냅샷 준비 중 (쓰기 잠금은 최대 2초 내 획득 후 즉시 해제)"
+            }
         }));
-        let snapshot = MysqlSharedSnapshot::acquire(&endpoint, options.threads)?;
+        let snapshot = match options.mysql_snapshot_mode {
+            MysqlSnapshotMode::ParallelStrict => {
+                MysqlSharedSnapshot::acquire(&endpoint, effective_threads)?
+            }
+            MysqlSnapshotMode::SingleConnection => {
+                MysqlSharedSnapshot::acquire_single_connection(&endpoint)?
+            }
+        };
         emit(json!({
             "event": "phase",
             "request_id": request.request_id,
             "phase": "snapshot",
-            "message": format!(
-                "MySQL 공유 일관 스냅샷 준비 완료: {}개 워커, {} ms (일반 쓰기 가능, DDL만 export 종료까지 제한)",
-                snapshot.workers.len(), snapshot.setup_ms
-            ),
-            "snapshot_policy": "mysql_shared_consistent_snapshot",
+            "message": if options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection {
+                format!(
+                    "MySQL 단일 연결 일관 스냅샷 준비 완료: 1개 워커, {} ms",
+                    snapshot.setup_ms
+                )
+            } else {
+                format!(
+                    "MySQL 공유 일관 스냅샷 준비 완료: {}개 워커, {} ms (일반 쓰기 가능, DDL만 export 종료까지 제한)",
+                    snapshot.workers.len(), snapshot.setup_ms
+                )
+            },
+            "snapshot_policy": if options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection {
+                "mysql_single_connection_consistent_snapshot"
+            } else {
+                "mysql_shared_consistent_snapshot"
+            },
             "worker_count": snapshot.workers.len(),
             "setup_ms": snapshot.setup_ms
         }));
@@ -648,9 +745,9 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
     ));
 
     let table_total = schema.tables.len();
-    let parallel_limits = dump_parallel_limits(options.threads, table_total);
-    let strategy = select_dump_strategy(&endpoint.engine, options.threads, table_total);
-    let export_tables = if options.threads > 1 && table_total > 1 {
+    let parallel_limits = dump_parallel_limits(effective_threads, table_total);
+    let strategy = select_dump_strategy(&endpoint.engine, effective_threads, table_total);
+    let export_tables = if effective_threads > 1 && table_total > 1 {
         dump_schedule_order(&schema.tables, &row_counts)
     } else {
         schema.tables.clone()
@@ -660,7 +757,7 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
         &export_tables,
         &row_counts,
         parallel_limits,
-        options.threads,
+        effective_threads,
         options.chunk_size,
         &options.data_format,
         &options.compression,
@@ -694,6 +791,25 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
             dump_tables_sequential(&mut adapter, &ctx, &export_tables, |event| emit(event))?
         }
     };
+
+    if endpoint.engine == "mysql"
+        && options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection
+    {
+        let mut schema_after = inspect_live(&endpoint)?.schema;
+        if !options.selected_tables.is_empty() {
+            let selected: BTreeSet<String> = options.selected_tables.iter().cloned().collect();
+            schema_after
+                .tables
+                .retain(|table| selected.contains(&table.name));
+        }
+        schema_after = dependency_ordered_schema(&schema_after);
+        if mysql_schema_drifted(&schema, &schema_after) {
+            return Err(
+                "mysql single-connection export detected schema changes during data extraction; retry when DDL is idle"
+                    .to_string(),
+            );
+        }
+    }
 
     let (manifest, views_count) = finalize_dump_manifest(
         &endpoint,
@@ -2078,6 +2194,107 @@ mod tests {
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
             ]
         );
+    }
+
+    #[test]
+    fn mysql_snapshot_mode_defaults_to_parallel_strict() {
+        let request = Request {
+            command: "dump.run".to_string(),
+            request_id: None,
+            payload: json!({"output_dir": "C:/tmp/tunnelforge-dump"}),
+        };
+
+        let options = parse_dump_run_options(&request).unwrap();
+
+        assert_eq!(options.mysql_snapshot_mode, MysqlSnapshotMode::ParallelStrict);
+    }
+
+    #[test]
+    fn mysql_snapshot_mode_accepts_single_connection() {
+        let request = Request {
+            command: "dump.run".to_string(),
+            request_id: None,
+            payload: json!({
+                "output_dir": "C:/tmp/tunnelforge-dump",
+                "mysql_snapshot_mode": "single_connection"
+            }),
+        };
+
+        let options = parse_dump_run_options(&request).unwrap();
+
+        assert_eq!(
+            options.mysql_snapshot_mode,
+            MysqlSnapshotMode::SingleConnection
+        );
+    }
+
+    #[test]
+    fn mysql_snapshot_mode_rejects_unknown_value() {
+        let request = Request {
+            command: "dump.run".to_string(),
+            request_id: None,
+            payload: json!({
+                "output_dir": "C:/tmp/tunnelforge-dump",
+                "mysql_snapshot_mode": "unsafe_parallel"
+            }),
+        };
+
+        let err = match parse_dump_run_options(&request) {
+            Ok(_) => panic!("unknown snapshot mode must be rejected"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            "unsupported mysql_snapshot_mode: unsafe_parallel"
+        );
+    }
+
+    #[test]
+    fn mysql_parallel_privilege_error_marks_access_denials_only() {
+        for code in [1045_u16, 1142, 1227] {
+            let err = mysql::Error::MySqlError(mysql::MySqlError {
+                state: "42000".to_string(),
+                message: "Access denied".to_string(),
+                code,
+            });
+
+            let marked = mysql_parallel_privilege_error(&err, "BACKUP_ADMIN").unwrap();
+
+            assert!(marked.starts_with(MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED));
+            assert!(marked.contains("BACKUP_ADMIN"));
+        }
+
+        let timeout = mysql::Error::MySqlError(mysql::MySqlError {
+            state: "HY000".to_string(),
+            message: "Lock wait timeout exceeded".to_string(),
+            code: 1205,
+        });
+        assert!(mysql_parallel_privilege_error(&timeout, "BACKUP_ADMIN").is_none());
+    }
+
+    #[test]
+    fn mysql_single_connection_setup_uses_only_read_only_snapshot_sql() {
+        assert_eq!(
+            mysql_single_connection_setup_sql(),
+            [
+                "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_schema_drift_detects_changed_table_definition() {
+        let before = NormalizedSchema {
+            tables: vec![empty_table("users", Vec::new())],
+        };
+        let after = NormalizedSchema {
+            tables: vec![empty_table("users_after_ddl", Vec::new())],
+        };
+
+        assert!(mysql_schema_drifted(&before, &after));
+        assert!(!mysql_schema_drifted(&before, &before));
     }
 
     #[test]

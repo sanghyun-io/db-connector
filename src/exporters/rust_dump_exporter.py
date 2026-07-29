@@ -26,6 +26,16 @@ from src.exporters.dump_progress import DumpEventCallbacks, TableProgressTracker
 logger = get_logger("rust_dump_exporter")
 
 DEFAULT_DUMP_COMPRESSION = "zstd"
+MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED = (
+    "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED"
+)
+MYSQL_SNAPSHOT_MODES = frozenset({"parallel_strict", "single_connection"})
+
+
+def is_mysql_parallel_snapshot_privilege_error(message: object) -> bool:
+    return MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED in str(message)
+
+
 DEFAULT_DUMP_THREADS = 8
 
 
@@ -220,16 +230,27 @@ class RustDumpExporter(_RustDumpClientBase):
         chunk_size: int = 50000,
         compression: str = DEFAULT_DUMP_COMPRESSION,
         callbacks: Optional[DumpEventCallbacks] = None,
+        mysql_snapshot_mode: str = "parallel_strict",
     ) -> Tuple[bool, str]:
         callbacks = callbacks or DumpEventCallbacks()
+        normalized_snapshot_mode = str(mysql_snapshot_mode).strip().lower()
+        if normalized_snapshot_mode not in MYSQL_SNAPSHOT_MODES:
+            raise ValueError(
+                f"unsupported mysql_snapshot_mode: {normalized_snapshot_mode}"
+            )
+        effective_threads = (
+            1 if normalized_snapshot_mode == "single_connection"
+            else max(1, int(threads))
+        )
         payload = {
             "source": self._endpoint(schema).to_payload(),
             "output_dir": output_dir,
             "overwrite": True,
-            "threads": max(1, int(threads)),
+            "threads": effective_threads,
             "chunk_size": max(1000, int(chunk_size)),
             "data_format": "tsv",
             "compression": compression if compression in {"none", "zstd"} else DEFAULT_DUMP_COMPRESSION,
+            "mysql_snapshot_mode": normalized_snapshot_mode,
         }
         if tables:
             payload["tables"] = tables
@@ -255,7 +276,9 @@ class RustDumpExporter(_RustDumpClientBase):
         if view_count:
             message += f", View {view_count}개"
         if result.get("snapshot_policy") == "mysql_shared_consistent_snapshot":
-            message += f" (MySQL 공유 일관 스냅샷, {max(1, int(threads))}개 워커)"
+            message += f" (MySQL 공유 일관 스냅샷, {effective_threads}개 워커)"
+        elif result.get("snapshot_policy") == "mysql_single_connection_consistent_snapshot":
+            message += " (MySQL 단일 연결 일관 스냅샷)"
         return True, message
 
     def export_full_schema(
@@ -269,6 +292,7 @@ class RustDumpExporter(_RustDumpClientBase):
         detail_callback: Optional[Callable[[dict], None]] = None,
         table_status_callback: Optional[Callable[[str, str, str], None]] = None,
         raw_output_callback: Optional[Callable[[str], None]] = None,
+        mysql_snapshot_mode: str = "parallel_strict",
     ) -> Tuple[bool, str]:
         try:
             success, message = self._run_rust_dump(
@@ -284,6 +308,7 @@ class RustDumpExporter(_RustDumpClientBase):
                     table_status=table_status_callback,
                     raw_output=raw_output_callback,
                 ),
+                mysql_snapshot_mode=mysql_snapshot_mode,
             )
             if success:
                 self._write_metadata(output_dir, schema, "full", None)
@@ -308,6 +333,7 @@ class RustDumpExporter(_RustDumpClientBase):
         detail_callback: Optional[Callable[[dict], None]] = None,
         table_status_callback: Optional[Callable[[str, str, str], None]] = None,
         raw_output_callback: Optional[Callable[[str], None]] = None,
+        mysql_snapshot_mode: str = "parallel_strict",
     ) -> Tuple[bool, str, List[str]]:
         try:
             final_tables = list(tables)
@@ -333,6 +359,7 @@ class RustDumpExporter(_RustDumpClientBase):
                     table_status=table_status_callback,
                     raw_output=raw_output_callback,
                 ),
+                mysql_snapshot_mode=mysql_snapshot_mode,
             )
             if success:
                 self._write_metadata(output_dir, schema, "partial", final_tables, added_tables)

@@ -959,10 +959,10 @@ def test_current_status_records_published_240_release():
     order = " ".join(_section(doc, "Recommended Execution Order").split())
     sessions = " ".join(_section(doc, "Session Log").split())
 
-    assert source_version == "2.4.1"
+    assert source_version == "2.4.2"
     assert "The latest stable release is now `v2.4.0`" in summary
     assert "anonymous error reporting" in summary
-    assert "Version references are aligned at `2.4.1`" in baseline
+    assert "Version references are aligned at `2.4.2`" in baseline
     assert "TF-STATUS-093 is `closed`" in summary
     assert "TF-STATUS-093 | High | closed" in tracker
     assert "`2.4.0` release-candidate preparation" in verification
@@ -1206,7 +1206,7 @@ def test_current_status_records_anonymous_error_reporting_design():
     order = " ".join(_section(doc, "Recommended Execution Order").split())
     sessions = " ".join(_section(doc, "Session Log").split())
 
-    assert "Last reviewed: 2026-07-21" in doc
+    assert "Last reviewed: 2026-07-29" in doc
     assert "dedicated reporter GitHub App" in summary
     assert "Cloudflare Worker" in summary
     assert "TF-STATUS-092 | High | closed" in tracker
