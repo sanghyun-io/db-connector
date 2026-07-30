@@ -793,8 +793,6 @@ def test_current_status_tracks_post_v217_version_drift_issue():
     normalized_doc = " ".join(doc.split())
     summary = " ".join(_section(doc, "Summary").split())
     baseline = _section(doc, "Current Baseline Verification")
-    version_source = (PROJECT_ROOT / "src" / "version.py").read_text(encoding="utf-8")
-    current_version = re.search(r'__version__\s*=\s*"([^"]+)"', version_source).group(1)
 
     assert "TF-STATUS-049" in doc
     assert "GitHub #149" in doc
@@ -802,7 +800,15 @@ def test_current_status_tracks_post_v217_version_drift_issue():
     assert "v2.1.7" in doc
     assert "2.1.8" in doc
     assert "GitHub #149 is fixed" in summary
-    assert f"Version references are aligned at `{current_version}`" in baseline
+    # 예전에는 `f"...aligned at `{current_version}`"` 로 src/version.py 를 파싱해
+    # 보간했는데, version-bump 봇은 baseline 프로세를 안 건드리므로 bump 순간
+    # 어긋나 pytest -q 를 깨뜨리는 두 번째 순환 트랩이었다(line 962 와 동일 부류).
+    # 특정 버전이 아니라 "정합 문장이 구체 버전과 함께 존재"함을 형식으로만
+    # 검증한다(버전업/문서 갱신 양쪽에 안전). 현재 버전 커플링은
+    # test_current_status_marker_tracks_source_version 이 트랩 없이 담당한다.
+    assert re.search(
+        r"Version references are aligned at `\d+\.\d+\.\d+`", baseline
+    ), "baseline must record version alignment at a concrete version"
 
 
 def test_current_status_tracks_rust_db_cursor_executemany_issue():
@@ -1392,3 +1398,57 @@ def test_current_status_release_publication_rows_are_well_formed():
         assert "asset" in row and "digest" in row, (
             f"{context}: missing asset/digest evidence"
         )
+
+
+def test_no_membership_assert_couples_to_parsed_source_version():
+    """회귀 방지: 이 파일의 어떤 테스트도 src/version.py 에서 파싱한 버전을
+    f-string 으로 보간해 문서 내용에 대한 membership(`... in doc/baseline/summary/
+    ...`)으로 단정해서는 안 된다.
+
+    그 패턴은 version-bump 봇이 버전을 bump 하는 순간(봇은 3개 버전 파일 +
+    마커만 갱신하고 문서 프로세는 안 건드림) 문서와 어긋나 pytest -q 를 깨뜨리는
+    순환 트랩이다(과거 line 805/962 사고 2건). 현재 배포 버전과의 커플링은
+    test_current_status_marker_tracks_source_version(마커==version.py) 만 트랩 없이
+    담당한다. AST 로 해당 형태의 assert 를 정적 검출한다.
+    """
+    import ast
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    # src/version.py 의 __version__ 을 파싱해 담는 변수명 수집
+    version_vars = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            call_src = ast.get_source_segment(src, node.value) or ""
+            if "__version__" in call_src:
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        version_vars.add(tgt.id)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        test = node.test
+        if not (
+            isinstance(test, ast.Compare)
+            and any(isinstance(op, ast.In) for op in test.ops)
+            and isinstance(test.left, ast.JoinedStr)
+        ):
+            continue
+        for value in test.left.values:
+            if (
+                isinstance(value, ast.FormattedValue)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in version_vars
+            ):
+                offenders.append(node.lineno)
+
+    assert not offenders, (
+        "membership assert interpolating a parsed src/version.py version found at "
+        f"lines {sorted(set(offenders))}; this recreates the version-bump CI trap. "
+        "Use test_current_status_marker_tracks_source_version or a format-only "
+        "regex check instead of interpolating the live-parsed version into an "
+        "`... in <doc section>` assertion."
+    )
