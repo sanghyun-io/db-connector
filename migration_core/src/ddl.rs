@@ -77,7 +77,17 @@ pub fn generate_post_data_ddl(schema: &NormalizedSchema, target: &str) -> Vec<St
             let columns = index
                 .columns
                 .iter()
-                .map(|column| quote_ident(target, column))
+                .enumerate()
+                .map(|(i, column)| {
+                    let ident = quote_ident(target, column);
+                    // MySQL prefix 인덱스(col(255))는 prefix 길이를 보존한다. postgresql은 prefix
+                    // 인덱스 개념이 없어 full 컬럼으로 둔다. 구 덤프(column_prefixes 없음)는
+                    // get(i)=None으로 full 처리되어 기존 동작과 동일하다.
+                    match index.column_prefixes.get(i).copied().flatten() {
+                        Some(prefix) if target == "mysql" => format!("{}({})", ident, prefix),
+                        _ => ident,
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             ddl.push(format!(
@@ -811,7 +821,7 @@ pub fn inspect_indexes_sql(engine: &str) -> &'static str {
     if engine == "postgresql" {
         "SELECT i.relname AS index_name, a.attname AS column_name, ix.indisunique AS is_unique FROM pg_class t JOIN pg_index ix ON t.oid = ix.indrelid JOIN pg_class i ON i.oid = ix.indexrelid JOIN pg_namespace n ON n.oid = t.relnamespace JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum WHERE n.nspname = $1 AND t.relname = $2 AND NOT ix.indisprimary ORDER BY i.relname, k.ord"
     } else {
-        "SELECT INDEX_NAME AS index_name, COLUMN_NAME AS column_name, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END AS is_unique FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY' ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+        "SELECT INDEX_NAME AS index_name, COLUMN_NAME AS column_name, SUB_PART AS sub_part, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END AS is_unique FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY' ORDER BY INDEX_NAME, SEQ_IN_INDEX"
     }
 }
 
@@ -833,18 +843,22 @@ pub(crate) fn apply_key_flags(
     columns
 }
 
-pub(crate) fn group_indexes(rows: Vec<(String, String, bool)>) -> Vec<NormalizedIndex> {
+pub(crate) fn group_indexes(
+    rows: Vec<(String, String, Option<u32>, bool)>,
+) -> Vec<NormalizedIndex> {
     let mut grouped: BTreeMap<String, NormalizedIndex> = BTreeMap::new();
-    for (name, column, unique) in rows {
+    for (name, column, sub_part, unique) in rows {
         let index = grouped
             .entry(name.clone())
             .or_insert_with(|| NormalizedIndex {
                 name,
                 columns: Vec::new(),
+                column_prefixes: Vec::new(),
                 unique,
             });
         index.unique = index.unique || unique;
         index.columns.push(column);
+        index.column_prefixes.push(sub_part);
     }
     grouped.into_values().collect()
 }
@@ -1699,6 +1713,7 @@ mod tests {
                     indexes: vec![NormalizedIndex {
                         name: "idx_orders_user_id".to_string(),
                         columns: vec!["user_id".to_string()],
+                        column_prefixes: vec![None],
                         unique: false,
                     }],
                     foreign_keys: vec![NormalizedForeignKey {
@@ -1760,6 +1775,7 @@ mod tests {
                     indexes: vec![NormalizedIndex {
                         name: "ux_cr_industry_briefs_slug".to_string(),
                         columns: vec!["slug".to_string()],
+                        column_prefixes: vec![None],
                         unique: true,
                     }],
                     foreign_keys: Vec::new(),
@@ -1797,6 +1813,7 @@ mod tests {
                 indexes: vec![NormalizedIndex {
                     name: "idx_orders_user_id".to_string(),
                     columns: vec!["user_id".to_string()],
+                    column_prefixes: vec![None],
                     unique: false,
                 }],
                 foreign_keys: Vec::new(),
@@ -1899,6 +1916,7 @@ mod tests {
                 indexes: vec![NormalizedIndex {
                     name: "idx_orders_user_id".to_string(),
                     columns: vec!["user_id".to_string()],
+                    column_prefixes: vec![None],
                     unique: false,
                 }],
                 foreign_keys: Vec::new(),
@@ -1941,6 +1959,7 @@ mod tests {
                 indexes: vec![NormalizedIndex {
                     name: "idx_orders_user_id".to_string(),
                     columns: vec!["user_id".to_string()],
+                    column_prefixes: vec![None],
                     unique: false,
                 }],
                 foreign_keys: Vec::new(),
@@ -1990,6 +2009,7 @@ mod tests {
                     indexes: vec![NormalizedIndex {
                         name: "idx_df_evaluation_results_audit_category_code".to_string(),
                         columns: vec!["audit_category_code".to_string()],
+                        column_prefixes: vec![None],
                         unique: false,
                     }],
                     foreign_keys: vec![NormalizedForeignKey {
@@ -2026,6 +2046,7 @@ mod tests {
                 indexes: vec![NormalizedIndex {
                     name: "idx_login_attempts_user_id".to_string(),
                     columns: vec!["user_id".to_string()],
+                    column_prefixes: vec![None],
                     unique: false,
                 }],
                 foreign_keys: Vec::new(),
@@ -2613,20 +2634,50 @@ mod tests {
             (
                 "idx_users_name_email".to_string(),
                 "name".to_string(),
+                Some(10),
                 false,
             ),
             (
                 "idx_users_name_email".to_string(),
                 "email".to_string(),
+                None,
                 false,
             ),
-            ("ux_users_slug".to_string(), "slug".to_string(), true),
+            ("ux_users_slug".to_string(), "slug".to_string(), None, true),
         ]);
 
         assert_eq!(indexes.len(), 2);
         assert_eq!(indexes[0].columns, vec!["name", "email"]);
+        // prefix 길이(SUB_PART)가 컬럼과 병렬로 보존되어야 한다.
+        assert_eq!(indexes[0].column_prefixes, vec![Some(10), None]);
         assert!(!indexes[0].unique);
         assert!(indexes[1].unique);
+    }
+
+    #[test]
+    fn post_load_ddl_preserves_mysql_index_prefix_length() {
+        // filename(255) 같은 prefix 인덱스가 full 컬럼이 아니라 col(255)로 재생성되어야 한다.
+        // (varchar(2083) utf8mb4를 full로 인덱싱하면 ERROR 1071: max key length 3072 초과)
+        let schema = NormalizedSchema {
+            tables: vec![NormalizedTable {
+                name: "attachment_storage".to_string(),
+                columns: Vec::new(),
+                indexes: vec![NormalizedIndex {
+                    name: "filename".to_string(),
+                    columns: vec!["filename".to_string()],
+                    column_prefixes: vec![Some(255)],
+                    unique: false,
+                }],
+                foreign_keys: Vec::new(),
+                table_collation: None,
+            }],
+        };
+        let ddl = generate_post_data_ddl(&schema, "mysql");
+        assert!(
+            ddl.iter()
+                .any(|s| s == "CREATE INDEX `filename` ON `attachment_storage` (`filename`(255));"),
+            "prefix index must be recreated as col(255), got: {ddl:?}"
+        );
     }
 
     #[test]

@@ -20,7 +20,34 @@ pub(crate) const MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MysqlSnapshotMode {
     ParallelStrict,
+    ParallelNoBackupLock,
     SingleConnection,
+}
+
+impl MysqlSnapshotMode {
+    /// manifest/이벤트에 기록하는 스냅샷 정책 라벨.
+    fn policy_label(self) -> &'static str {
+        match self {
+            MysqlSnapshotMode::ParallelStrict => "mysql_shared_consistent_snapshot",
+            MysqlSnapshotMode::ParallelNoBackupLock => {
+                "mysql_parallel_no_backup_lock_consistent_snapshot"
+            }
+            MysqlSnapshotMode::SingleConnection => "mysql_single_connection_consistent_snapshot",
+        }
+    }
+
+    /// 덤프 중 DDL 변경을 백업 락으로 막지 못하므로 사후 schema drift 검사가 필요한 모드인지.
+    fn requires_ddl_drift_check(self) -> bool {
+        matches!(
+            self,
+            MysqlSnapshotMode::ParallelNoBackupLock | MysqlSnapshotMode::SingleConnection
+        )
+    }
+
+    /// 단일 연결 모드는 워커 수를 1로 강제한다.
+    fn forces_single_thread(self) -> bool {
+        matches!(self, MysqlSnapshotMode::SingleConnection)
+    }
 }
 
 fn mysql_snapshot_worker_setup_sql() -> [&'static str; 2] {
@@ -28,10 +55,6 @@ fn mysql_snapshot_worker_setup_sql() -> [&'static str; 2] {
         "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
     ]
-}
-
-fn mysql_single_connection_setup_sql() -> [&'static str; 2] {
-    mysql_snapshot_worker_setup_sql()
 }
 
 fn mysql_snapshot_coordinator_sql() -> [&'static str; 4] {
@@ -62,6 +85,9 @@ struct MysqlSharedSnapshot {
 }
 
 impl MysqlSharedSnapshot {
+    /// parallel_strict 전용: 짧은 글로벌 read lock(FTWRL) + LOCK INSTANCE FOR BACKUP으로
+    /// 모든 워커가 동일 시점 스냅샷을 공유한다. RDS처럼 글로벌 락/BACKUP_ADMIN이 막힌
+    /// 환경에서는 실패하며, 그 경우 lock-free 경로로 폴백해야 한다.
     fn acquire(endpoint: &Endpoint, worker_count: usize) -> Result<Self, String> {
         let started = Instant::now();
         let mut coordinator = mysql_connection(endpoint)?;
@@ -137,17 +163,29 @@ impl MysqlSharedSnapshot {
         })
     }
 
-    fn acquire_single_connection(endpoint: &Endpoint) -> Result<Self, String> {
+    /// lock-free 경로: 글로벌 락(FTWRL)도 백업 락(LOCK INSTANCE FOR BACKUP)도 요청하지 않는다.
+    /// 각 워커가 자기 연결에서 독립적으로 REPEATABLE READ + CONSISTENT SNAPSHOT을 잡는다.
+    /// - RDS처럼 글로벌 락이 막힌 환경에서도 동작한다.
+    /// - worker_count>1이면 병렬로 처리량을 높인다(각 워커/청크가 자기 스냅샷을 읽음).
+    /// - 워커 간 스냅샷 시점이 완전히 동일하지는 않으므로(테이블/청크 간 미세한 시점차),
+    ///   시점-완전-일관이 필수가 아닌 용도(prod→test 데이터 복제 등)에 적합하다.
+    ///   worker_count==1이면 단일 트랜잭션이라 완전 일관(구 single_connection과 동일).
+    /// - 덤프 중 DDL 변경은 이후 schema drift 검사로 잡는다.
+    fn acquire_lock_free(endpoint: &Endpoint, worker_count: usize) -> Result<Self, String> {
         let started = Instant::now();
-        let mut worker = mysql_connection(endpoint)?;
-        for sql in mysql_single_connection_setup_sql() {
-            worker
-                .query_drop(sql)
-                .map_err(|err| format!("mysql single-connection snapshot setup failed: {err}"))?;
+        let mut workers = (0..worker_count.max(1))
+            .map(|_| mysql_connection(endpoint))
+            .collect::<Result<Vec<_>, _>>()?;
+        for worker in &mut workers {
+            for sql in mysql_snapshot_worker_setup_sql() {
+                worker
+                    .query_drop(sql)
+                    .map_err(|err| format!("mysql lock-free snapshot setup failed: {err}"))?;
+            }
         }
         Ok(Self {
             coordinator: None,
-            workers: vec![worker],
+            workers,
             setup_ms: started.elapsed().as_millis().max(1) as u64,
         })
     }
@@ -156,11 +194,14 @@ impl MysqlSharedSnapshot {
         std::mem::take(&mut self.workers)
     }
 
-    fn validate_transactional_tables(
+    /// non-InnoDB(비트랜잭션) 테이블 이름을 조회해 반환한다.
+    /// consistent snapshot은 InnoDB MVCC 기반이라 MEMORY/MyISAM 등은 스냅샷 일관성을
+    /// 보장할 수 없으므로, 호출부에서 export 대상에서 제외한다(경고와 함께).
+    fn non_transactional_table_names(
         &mut self,
         endpoint: &Endpoint,
         tables: &[NormalizedTable],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
         let worker = self
             .workers
             .first_mut()
@@ -177,26 +218,18 @@ impl MysqlSharedSnapshot {
                 table_names
             ))
             .map_err(|err| format!("mysql snapshot table-engine inspection failed: {err}"))?;
-        let offenders = non_transactional_mysql_tables(&rows);
-        if offenders.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "mysql online consistent export requires InnoDB tables; convert or separately handle: {}",
-                offenders.join(", ")
-            ))
-        }
+        Ok(non_innodb_table_names(&rows))
     }
 }
 
-fn non_transactional_mysql_tables(rows: &[(String, String)]) -> Vec<String> {
-    let mut offenders = rows
+fn non_innodb_table_names(rows: &[(String, String)]) -> Vec<String> {
+    let mut names = rows
         .iter()
         .filter(|(_, engine)| !engine.eq_ignore_ascii_case("innodb"))
-        .map(|(table, engine)| format!("{table} ({engine})"))
+        .map(|(table, _)| table.clone())
         .collect::<Vec<_>>();
-    offenders.sort();
-    offenders
+    names.sort();
+    names
 }
 
 impl Drop for MysqlSharedSnapshot {
@@ -564,6 +597,7 @@ fn parse_dump_run_options(request: &Request) -> Result<DumpRunOptions, String> {
         .as_str()
     {
         "parallel_strict" => MysqlSnapshotMode::ParallelStrict,
+        "parallel_no_backup_lock" => MysqlSnapshotMode::ParallelNoBackupLock,
         "single_connection" => MysqlSnapshotMode::SingleConnection,
         other => return Err(format!("unsupported mysql_snapshot_mode: {other}")),
     };
@@ -637,7 +671,7 @@ fn finalize_dump_manifest<F: FnMut(Value)>(
     let (snapshot_policy, strict_export, manifest_warnings) =
         dump_manifest_consistency_metadata(
             &endpoint.engine,
-            options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection,
+            options.mysql_snapshot_mode.policy_label(),
         );
 
     let manifest = DumpManifest {
@@ -668,7 +702,7 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
     prepare_dump_output_dir(output_path, options.overwrite)?;
 
     let effective_threads = if endpoint.engine == "mysql"
-        && options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection
+        && options.mysql_snapshot_mode.forces_single_thread()
     {
         1
     } else {
@@ -679,40 +713,42 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
             "event": "phase",
             "request_id": request.request_id,
             "phase": "snapshot",
-            "message": if options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection {
-                "단일 연결 일관 스냅샷 준비 중 (관리 권한 불필요)"
-            } else {
-                "공유 일관 스냅샷 준비 중 (쓰기 잠금은 최대 2초 내 획득 후 즉시 해제)"
+            "message": match options.mysql_snapshot_mode {
+                MysqlSnapshotMode::SingleConnection =>
+                    "단일 연결 일관 스냅샷 준비 중 (관리 권한 불필요)",
+                MysqlSnapshotMode::ParallelNoBackupLock =>
+                    "병렬 일관 스냅샷 준비 중 (백업 락 생략, BACKUP_ADMIN 불필요; 쓰기 잠금은 최대 2초 내 획득 후 즉시 해제)",
+                MysqlSnapshotMode::ParallelStrict =>
+                    "공유 일관 스냅샷 준비 중 (쓰기 잠금은 최대 2초 내 획득 후 즉시 해제)",
             }
         }));
         let snapshot = match options.mysql_snapshot_mode {
             MysqlSnapshotMode::ParallelStrict => {
                 MysqlSharedSnapshot::acquire(&endpoint, effective_threads)?
             }
-            MysqlSnapshotMode::SingleConnection => {
-                MysqlSharedSnapshot::acquire_single_connection(&endpoint)?
-            }
+            // ParallelNoBackupLock: 락 없이 각 워커가 독립 스냅샷으로 병렬.
+            // SingleConnection: 락 없이 단일 워커(effective_threads가 1로 강제됨).
+            _ => MysqlSharedSnapshot::acquire_lock_free(&endpoint, effective_threads)?,
         };
         emit(json!({
             "event": "phase",
             "request_id": request.request_id,
             "phase": "snapshot",
-            "message": if options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection {
-                format!(
+            "message": match options.mysql_snapshot_mode {
+                MysqlSnapshotMode::SingleConnection => format!(
                     "MySQL 단일 연결 일관 스냅샷 준비 완료: 1개 워커, {} ms",
                     snapshot.setup_ms
-                )
-            } else {
-                format!(
+                ),
+                MysqlSnapshotMode::ParallelNoBackupLock => format!(
+                    "MySQL 병렬 일관 스냅샷 준비 완료 (백업 락 생략): {}개 워커, {} ms (덤프 후 DDL 변경 검사)",
+                    snapshot.workers.len(), snapshot.setup_ms
+                ),
+                MysqlSnapshotMode::ParallelStrict => format!(
                     "MySQL 공유 일관 스냅샷 준비 완료: {}개 워커, {} ms (일반 쓰기 가능, DDL만 export 종료까지 제한)",
                     snapshot.workers.len(), snapshot.setup_ms
-                )
+                ),
             },
-            "snapshot_policy": if options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection {
-                "mysql_single_connection_consistent_snapshot"
-            } else {
-                "mysql_shared_consistent_snapshot"
-            },
+            "snapshot_policy": options.mysql_snapshot_mode.policy_label(),
             "worker_count": snapshot.workers.len(),
             "setup_ms": snapshot.setup_ms
         }));
@@ -734,7 +770,30 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
         return Err("dump.run found no tables to export".to_string());
     }
     if let Some(snapshot) = mysql_snapshot.as_mut() {
-        snapshot.validate_transactional_tables(&endpoint, &schema.tables)?;
+        // consistent snapshot은 InnoDB MVCC 기반이라 MEMORY/MyISAM 등 비트랜잭션 테이블은
+        // 스냅샷 일관성을 보장할 수 없다. 전체 export를 막는 대신 해당 테이블만 제외하고
+        // 경고를 남긴다(휘발성 MEMORY 임시 테이블 등은 복제 대상이 아닌 경우가 대부분).
+        let non_txn = snapshot.non_transactional_table_names(&endpoint, &schema.tables)?;
+        if !non_txn.is_empty() {
+            let excluded: BTreeSet<String> = non_txn.iter().cloned().collect();
+            schema.tables.retain(|table| !excluded.contains(&table.name));
+            emit(json!({
+                "event": "phase",
+                "request_id": request.request_id,
+                "phase": "snapshot",
+                "message": format!(
+                    "consistent snapshot 대상이 아닌 비트랜잭션 테이블 {}개 제외(휘발성/비InnoDB): {}",
+                    non_txn.len(),
+                    non_txn.join(", ")
+                ),
+            }));
+            if schema.tables.is_empty() {
+                return Err(
+                    "dump.run found no InnoDB tables to export after excluding non-transactional tables"
+                        .to_string(),
+                );
+            }
+        }
     }
 
     let row_counts = dump_table_row_counts(&endpoint, &schema.tables);
@@ -792,20 +851,20 @@ fn dump_run<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value, St
         }
     };
 
-    if endpoint.engine == "mysql"
-        && options.mysql_snapshot_mode == MysqlSnapshotMode::SingleConnection
-    {
+    if endpoint.engine == "mysql" && options.mysql_snapshot_mode.requires_ddl_drift_check() {
         let mut schema_after = inspect_live(&endpoint)?.schema;
-        if !options.selected_tables.is_empty() {
-            let selected: BTreeSet<String> = options.selected_tables.iter().cloned().collect();
-            schema_after
-                .tables
-                .retain(|table| selected.contains(&table.name));
-        }
+        // before(schema)는 이미 selected 필터 + non-transactional(_contents_qcs 등 MEMORY) 제외를
+        // 거친 실제 export 대상이다. after도 그 테이블 집합으로 맞춰야, 제외된 테이블이 after에만
+        // 존재하는 것을 DDL 변경으로 오탐하지 않는다.
+        let exported: BTreeSet<String> =
+            schema.tables.iter().map(|table| table.name.clone()).collect();
+        schema_after
+            .tables
+            .retain(|table| exported.contains(&table.name));
         schema_after = dependency_ordered_schema(&schema_after);
         if mysql_schema_drifted(&schema, &schema_after) {
             return Err(
-                "mysql single-connection export detected schema changes during data extraction; retry when DDL is idle"
+                "mysql online consistent export detected schema changes during data extraction; retry when DDL is idle"
                     .to_string(),
             );
         }
@@ -2229,6 +2288,52 @@ mod tests {
     }
 
     #[test]
+    fn mysql_snapshot_mode_accepts_parallel_no_backup_lock() {
+        let request = Request {
+            command: "dump.run".to_string(),
+            request_id: None,
+            payload: json!({
+                "output_dir": "C:/tmp/tunnelforge-dump",
+                "mysql_snapshot_mode": "parallel_no_backup_lock"
+            }),
+        };
+
+        let options = parse_dump_run_options(&request).unwrap();
+
+        assert_eq!(
+            options.mysql_snapshot_mode,
+            MysqlSnapshotMode::ParallelNoBackupLock
+        );
+    }
+
+    #[test]
+    fn mysql_snapshot_mode_drift_and_thread_semantics() {
+        // parallel_strict: 백업 락이 DDL을 차단하므로 drift 검사 불필요, 병렬 유지
+        assert!(!MysqlSnapshotMode::ParallelStrict.requires_ddl_drift_check());
+        assert!(!MysqlSnapshotMode::ParallelStrict.forces_single_thread());
+        assert_eq!(
+            MysqlSnapshotMode::ParallelStrict.policy_label(),
+            "mysql_shared_consistent_snapshot"
+        );
+
+        // parallel_no_backup_lock: 락 없음, drift 검사로 DDL 보완, 병렬 유지
+        assert!(MysqlSnapshotMode::ParallelNoBackupLock.requires_ddl_drift_check());
+        assert!(!MysqlSnapshotMode::ParallelNoBackupLock.forces_single_thread());
+        assert_eq!(
+            MysqlSnapshotMode::ParallelNoBackupLock.policy_label(),
+            "mysql_parallel_no_backup_lock_consistent_snapshot"
+        );
+
+        // single_connection: 락 없음, drift 검사 필요, 단일 스레드 강제
+        assert!(MysqlSnapshotMode::SingleConnection.requires_ddl_drift_check());
+        assert!(MysqlSnapshotMode::SingleConnection.forces_single_thread());
+        assert_eq!(
+            MysqlSnapshotMode::SingleConnection.policy_label(),
+            "mysql_single_connection_consistent_snapshot"
+        );
+    }
+
+    #[test]
     fn mysql_snapshot_mode_rejects_unknown_value() {
         let request = Request {
             command: "dump.run".to_string(),
@@ -2274,17 +2379,6 @@ mod tests {
     }
 
     #[test]
-    fn mysql_single_connection_setup_uses_only_read_only_snapshot_sql() {
-        assert_eq!(
-            mysql_single_connection_setup_sql(),
-            [
-                "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-                "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
-            ]
-        );
-    }
-
-    #[test]
     fn mysql_schema_drift_detects_changed_table_definition() {
         let before = NormalizedSchema {
             tables: vec![empty_table("users", Vec::new())],
@@ -2311,15 +2405,16 @@ mod tests {
     }
 
     #[test]
-    fn mysql_shared_snapshot_rejects_non_transactional_tables() {
+    fn non_innodb_table_names_returns_only_non_innodb_names() {
         let rows = vec![
             ("users".to_string(), "InnoDB".to_string()),
+            ("_contents_qcs".to_string(), "MEMORY".to_string()),
             ("legacy_cache".to_string(), "MyISAM".to_string()),
         ];
 
         assert_eq!(
-            non_transactional_mysql_tables(&rows),
-            vec!["legacy_cache (MyISAM)".to_string()]
+            non_innodb_table_names(&rows),
+            vec!["_contents_qcs".to_string(), "legacy_cache".to_string()]
         );
     }
 

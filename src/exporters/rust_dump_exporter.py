@@ -29,11 +29,37 @@ DEFAULT_DUMP_COMPRESSION = "zstd"
 MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED = (
     "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED"
 )
-MYSQL_SNAPSHOT_MODES = frozenset({"parallel_strict", "single_connection"})
+MYSQL_SNAPSHOT_MODES = frozenset(
+    {"parallel_strict", "parallel_no_backup_lock", "single_connection"}
+)
+# FTWRL(글로벌 read lock) 단계에서 거부되면 병렬 스냅샷 자체가 불가능하고,
+# BACKUP_ADMIN(LOCK INSTANCE FOR BACKUP) 단계에서만 거부되면 백업 락을 생략한
+# 병렬 스냅샷(parallel_no_backup_lock)으로 우회할 수 있다.
+MYSQL_PRIVILEGE_BACKUP_ADMIN = "BACKUP_ADMIN"
+MYSQL_PRIVILEGE_FLUSH_OR_RELOAD = "FLUSH_TABLES_OR_RELOAD"
 
 
 def is_mysql_parallel_snapshot_privilege_error(message: object) -> bool:
     return MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED in str(message)
+
+
+def mysql_parallel_snapshot_denied_privilege(message: object) -> Optional[str]:
+    """병렬 스냅샷 권한 거부 마커에서 거부된 권한 이름을 추출한다.
+
+    마커 형식은 ``MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED:<privilege>:<server_error>``.
+    마커가 없으면 None을 반환한다.
+    """
+    text = str(message)
+    marker = MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED
+    index = text.find(marker)
+    if index == -1:
+        return None
+    remainder = text[index + len(marker):]
+    parts = remainder.split(":")
+    # parts[0]은 마커 바로 뒤(구분자로 인한 빈 문자열), parts[1]이 권한 이름이다.
+    if len(parts) >= 2 and parts[1]:
+        return parts[1]
+    return None
 
 
 DEFAULT_DUMP_THREADS = 8
@@ -275,9 +301,14 @@ class RustDumpExporter(_RustDumpClientBase):
         message = f"Rust DB Core export 완료: {table_count}개 테이블, {rows:,} rows"
         if view_count:
             message += f", View {view_count}개"
-        if result.get("snapshot_policy") == "mysql_shared_consistent_snapshot":
+        snapshot_policy = result.get("snapshot_policy")
+        if snapshot_policy == "mysql_shared_consistent_snapshot":
             message += f" (MySQL 공유 일관 스냅샷, {effective_threads}개 워커)"
-        elif result.get("snapshot_policy") == "mysql_single_connection_consistent_snapshot":
+        elif snapshot_policy == "mysql_parallel_no_backup_lock_consistent_snapshot":
+            message += (
+                f" (MySQL 락 없는 병렬 스냅샷, {effective_threads}개 워커)"
+            )
+        elif snapshot_policy == "mysql_single_connection_consistent_snapshot":
             message += " (MySQL 단일 연결 일관 스냅샷)"
         return True, message
 

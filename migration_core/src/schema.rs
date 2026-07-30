@@ -197,7 +197,11 @@ trait InspectAdapter {
         schema: &str,
         table: &str,
     ) -> Result<Vec<(String, String, String, String)>, String>;
-    fn indexes(&mut self, schema: &str, table: &str) -> Result<Vec<(String, String, bool)>, String>;
+    fn indexes(
+        &mut self,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<(String, String, Option<u32>, bool)>, String>;
     fn unsupported_objects(&mut self, schema: &str) -> Result<Vec<String>, String>;
 }
 
@@ -317,12 +321,14 @@ impl InspectAdapter for MysqlInspectAdapter {
         &mut self,
         schema: &str,
         table: &str,
-    ) -> Result<Vec<(String, String, bool)>, String> {
+    ) -> Result<Vec<(String, String, Option<u32>, bool)>, String> {
         self.conn
             .exec_map(
                 inspect_indexes_sql("mysql"),
                 (schema, table),
-                |(name, column, is_unique): (String, String, u8)| (name, column, is_unique == 1),
+                |(name, column, sub_part, is_unique): (String, String, Option<u32>, u8)| {
+                    (name, column, sub_part, is_unique == 1)
+                },
             )
             .map_err(|err| format!("mysql index inspect error: {err}"))
     }
@@ -488,7 +494,7 @@ impl InspectAdapter for PostgresInspectAdapter {
         &mut self,
         schema: &str,
         table: &str,
-    ) -> Result<Vec<(String, String, bool)>, String> {
+    ) -> Result<Vec<(String, String, Option<u32>, bool)>, String> {
         let index_rows = self
             .client
             .query(inspect_indexes_sql("postgresql"), &[&schema, &table])
@@ -499,7 +505,8 @@ impl InspectAdapter for PostgresInspectAdapter {
                 let name: String = row.get(0);
                 let column: String = row.get(1);
                 let is_unique: bool = row.get(2);
-                (name, column, is_unique)
+                // postgresql은 MySQL식 prefix 인덱스가 없으므로 항상 full(None).
+                (name, column, None, is_unique)
             })
             .collect())
     }

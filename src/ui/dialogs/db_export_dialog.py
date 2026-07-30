@@ -26,7 +26,8 @@ from src.core.logger import get_logger
 from src.core.path_safety import safe_output_dir
 from src.exporters.rust_dump_exporter import (
     RustDumpChecker, build_rust_dump_config, check_rust_dump,
-    DEFAULT_DUMP_COMPRESSION, is_mysql_parallel_snapshot_privilege_error
+    DEFAULT_DUMP_COMPRESSION, is_mysql_parallel_snapshot_privilege_error,
+    mysql_parallel_snapshot_denied_privilege
 )
 from src.ui.dialogs.collapsible_config_dialog import CollapsibleConfigDialog
 from src.ui.workers.error_reporting_worker import ErrorReportingMixin
@@ -317,6 +318,7 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         self._cancel_requested = False
         self._close_after_cancel = False
         self._mysql_single_connection_fallback = False
+        self._mysql_no_backup_lock_fallback = False
 
         # 로그 수집용 변수
         self.log_entries: List[str] = []
@@ -1048,6 +1050,7 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         self._cancel_requested = False
         self._close_after_cancel = False
         self._mysql_single_connection_fallback = False
+        self._mysql_no_backup_lock_fallback = False
 
     def _build_worker(
         self,
@@ -1090,15 +1093,38 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         worker.finished.connect(self.on_finished)
         worker.start()
 
-    def _create_mysql_privilege_dialog(self) -> QMessageBox:
+    def _create_mysql_privilege_dialog(
+        self, denied_privilege: Optional[str] = None
+    ) -> QMessageBox:
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Warning)
         message_box.setWindowTitle("병렬 Export 권한 필요")
-        message_box.setText(
-            "병렬 Export에 필요한 MySQL 권한이 없습니다.\n\n"
-            "권한 없이 단일 연결로 안전하게 Export할 수 있지만 "
-            "병렬 처리는 사용되지 않습니다."
-        )
+        # lock-free 병렬 모드는 글로벌 락(FTWRL)도 백업 락(LOCK INSTANCE FOR BACKUP)도
+        # 쓰지 않으므로, 어떤 락 권한이 거부됐든(FLUSH_TABLES_OR_RELOAD 또는 BACKUP_ADMIN)
+        # 병렬 처리를 유지한 채 우회할 수 있다. RDS처럼 FTWRL이 막힌 환경이 여기 해당한다.
+        can_keep_parallel = denied_privilege is not None
+        if can_keep_parallel:
+            message_box.setText(
+                "병렬 Export에 필요한 락 권한이 없습니다.\n\n"
+                "락 없이 각 워커가 독립 스냅샷으로 병렬 Export할 수 있습니다. 속도는 유지되며, "
+                "워커 간 스냅샷 시점이 미세하게 달라질 수 있어 덤프 후 스키마 변경(DDL) 여부를 "
+                "검사해 무결성을 확인합니다."
+            )
+        else:
+            message_box.setText(
+                "병렬 Export에 필요한 MySQL 권한이 없습니다.\n\n"
+                "권한 없이 단일 연결로 안전하게 Export할 수 있지만 "
+                "병렬 처리는 사용되지 않습니다."
+            )
+
+        parallel_button = None
+        if can_keep_parallel:
+            parallel_button = message_box.addButton(
+                translate_text("병렬로 계속 (락 없이)"),
+                QMessageBox.ButtonRole.AcceptRole,
+            )
+            parallel_button.setObjectName("mysql_parallel_no_backup_lock_continue")
+
         continue_button = message_box.addButton(
             translate_text("단일 연결로 계속"),
             QMessageBox.ButtonRole.AcceptRole,
@@ -1114,16 +1140,19 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
             QMessageBox.ButtonRole.RejectRole,
         )
         cancel_button.setObjectName("mysql_privilege_cancel")
-        message_box.setDefaultButton(continue_button)
+        message_box.setDefaultButton(parallel_button or continue_button)
         message_box.setEscapeButton(cancel_button)
         return message_box
 
-    def _prompt_mysql_privilege_action(self) -> str:
-        message_box = self._create_mysql_privilege_dialog()
+    def _prompt_mysql_privilege_action(
+        self, denied_privilege: Optional[str] = None
+    ) -> str:
+        message_box = self._create_mysql_privilege_dialog(denied_privilege)
         message_box.exec()
         clicked = message_box.clickedButton()
         object_name = clicked.objectName() if clicked is not None else ""
         return {
+            "mysql_parallel_no_backup_lock_continue": "parallel_no_backup_lock",
             "mysql_single_connection_continue": "continue",
             "mysql_privilege_guidance": "guidance",
         }.get(object_name, "cancel")
@@ -1150,6 +1179,21 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
             self.export_schema,
             self.input_output_dir.text(),
             mysql_snapshot_mode="single_connection",
+        )
+        self._start_export_worker(worker)
+
+    def _retry_with_parallel_no_backup_lock(self) -> None:
+        self._mysql_no_backup_lock_fallback = True
+        self._add_log(
+            "락 권한 없음: 락 없이 각 워커 독립 스냅샷으로 병렬 재시도합니다."
+        )
+        self.set_ui_enabled(False)
+        self.collapse_config_section()
+        self.label_status.setText("락 없는 병렬 스냅샷으로 다시 시도 중...")
+        worker = self._build_worker(
+            self.export_schema,
+            self.input_output_dir.text(),
+            mysql_snapshot_mode="parallel_no_backup_lock",
         )
         self._start_export_worker(worker)
 
@@ -1192,9 +1236,14 @@ class RustDumpExportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         if (
             not success
             and not self._mysql_single_connection_fallback
+            and not self._mysql_no_backup_lock_fallback
             and is_mysql_parallel_snapshot_privilege_error(message)
         ):
-            privilege_action = self._prompt_mysql_privilege_action()
+            denied_privilege = mysql_parallel_snapshot_denied_privilege(message)
+            privilege_action = self._prompt_mysql_privilege_action(denied_privilege)
+            if privilege_action == "parallel_no_backup_lock":
+                self._retry_with_parallel_no_backup_lock()
+                return
             if privilege_action == "continue":
                 self._retry_with_single_connection()
                 return
