@@ -793,8 +793,6 @@ def test_current_status_tracks_post_v217_version_drift_issue():
     normalized_doc = " ".join(doc.split())
     summary = " ".join(_section(doc, "Summary").split())
     baseline = _section(doc, "Current Baseline Verification")
-    version_source = (PROJECT_ROOT / "src" / "version.py").read_text(encoding="utf-8")
-    current_version = re.search(r'__version__\s*=\s*"([^"]+)"', version_source).group(1)
 
     assert "TF-STATUS-049" in doc
     assert "GitHub #149" in doc
@@ -802,7 +800,15 @@ def test_current_status_tracks_post_v217_version_drift_issue():
     assert "v2.1.7" in doc
     assert "2.1.8" in doc
     assert "GitHub #149 is fixed" in summary
-    assert f"Version references are aligned at `{current_version}`" in baseline
+    # 예전에는 `f"...aligned at `{current_version}`"` 로 src/version.py 를 파싱해
+    # 보간했는데, version-bump 봇은 baseline 프로세를 안 건드리므로 bump 순간
+    # 어긋나 pytest -q 를 깨뜨리는 두 번째 순환 트랩이었다(line 962 와 동일 부류).
+    # 특정 버전이 아니라 "정합 문장이 구체 버전과 함께 존재"함을 형식으로만
+    # 검증한다(버전업/문서 갱신 양쪽에 안전). 현재 버전 커플링은
+    # test_current_status_marker_tracks_source_version 이 트랩 없이 담당한다.
+    assert re.search(
+        r"Version references are aligned at `\d+\.\d+\.\d+`", baseline
+    ), "baseline must record version alignment at a concrete version"
 
 
 def test_current_status_tracks_rust_db_cursor_executemany_issue():
@@ -959,7 +965,12 @@ def test_current_status_records_published_240_release():
     order = " ".join(_section(doc, "Recommended Execution Order").split())
     sessions = " ".join(_section(doc, "Session Log").split())
 
-    assert source_version == "2.4.2"
+    # 이 역사 기록 테스트는 특정 버전 리터럴에 고정하지 않는다. 예전에는
+    # `source_version == "2.4.2"` 로 하드핀되어 있어, version-gate 봇이 버전을
+    # 자동 bump 하는 순간 pytest -q 가 깨지는 순환 차단점이었다. 현재 배포
+    # 버전과의 커플링은 test_current_status_marker_tracks_source_version 이
+    # 트랩 없이(봇 자동 마커) 담당한다.
+    assert re.fullmatch(r"\d+\.\d+\.\d+", source_version), source_version
     assert "The latest stable release is now `v2.4.0`" in summary
     assert "anonymous error reporting" in summary
     assert "Version references are aligned at `2.4.2`" in baseline
@@ -1319,3 +1330,125 @@ def test_current_status_tracks_242_mysql_export_fallback_release_closure():
     assert "UpdateChecker" in verification
     assert "Keep TF-STATUS-097 closed" in order
     assert "Published `v2.4.2` as stable/latest" in sessions
+
+
+def test_current_status_marker_tracks_source_version():
+    """current_status.md 상단의 'Current shipping version' 마커는 src/version.py
+    와 일치해야 한다.
+
+    이 마커는 version-gate.yml 의 version-bump 봇이 세 버전 파일과 함께 자동
+    갱신한다(scripts/bump_version.py -> versioning.sync_status_marker). 따라서
+    가벼운 커플링(문서가 현재 배포 버전을 추적)을 사람 손질 없이 유지하며,
+    봇이 마커를 빠뜨려 둘이 어긋나면 이 테스트가 잡아낸다. 예전의
+    `source_version == "2.4.2"` 하드핀과 달리 특정 버전에 고정하지 않으므로
+    버전업이 CI 를 깨뜨리지 않는다.
+    """
+    doc = (PROJECT_ROOT / "docs" / "current_status.md").read_text(encoding="utf-8")
+    version_source = (PROJECT_ROOT / "src" / "version.py").read_text(encoding="utf-8")
+    source_match = re.search(r'__version__\s*=\s*"([^"]+)"', version_source)
+    assert source_match is not None, "src/version.py must define __version__"
+    source_version = source_match.group(1)
+
+    marker = re.search(r"Current shipping version:\s*`v(\d+\.\d+\.\d+)`", doc)
+    assert marker is not None, (
+        "current_status.md must carry a 'Current shipping version: `vX.Y.Z`' "
+        "marker (bot-maintained by scripts/bump_version.py)"
+    )
+    assert marker.group(1) == source_version, (
+        f"status marker `v{marker.group(1)}` must match src/version.py "
+        f"`{source_version}`; run scripts/bump_version.py to resync the marker"
+    )
+
+
+def test_current_status_release_publication_rows_are_well_formed():
+    """Verification Log 의 릴리스 발행(publication) 행은 릴리스별로 리터럴을
+    하드코딩한 새 테스트를 작성하지 않아도 실제 증거의 형태를 갖추도록 강제한다.
+
+    각 발행 행(Scope 열이 `vX.Y.Z` 를 담고 'publication' 을 언급)은 다음을
+    포함해야 한다: PR 참조, 최소 1개의 워크플로 run ID, 40자 머지 커밋,
+    자산/다이제스트 신호. 새 릴리스는 scripts/record_release.py 로 이 형식의
+    행을 append 하면 되고, 별도의 프리즈된 테스트를 매번 작성할 필요가 없다.
+    """
+    doc = (PROJECT_ROOT / "docs" / "current_status.md").read_text(encoding="utf-8")
+    log = _section(doc, "Verification Log")
+
+    publication_rows = []
+    for line in log.splitlines():
+        if not line.startswith("| "):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 5:
+            continue
+        scope = cells[1]  # Date=0, Scope=1, Command=2, Result=3, Notes=4
+        if "publication" in scope and re.search(r"`v\d+\.\d+\.\d+`", scope):
+            publication_rows.append((scope, line))
+
+    assert publication_rows, (
+        "Verification Log must contain at least one release-publication row"
+    )
+
+    for scope, row in publication_rows:
+        version = re.search(r"`v(\d+\.\d+\.\d+)`", scope).group(1)
+        context = f"`v{version}` publication row"
+        assert re.search(r"PR #\d+", row), f"{context}: missing PR reference"
+        assert re.search(r"\b\d{8,}\b", row), f"{context}: missing workflow run id"
+        assert re.search(r"\b[0-9a-f]{40}\b", row), (
+            f"{context}: missing 40-hex merge commit"
+        )
+        assert "asset" in row and "digest" in row, (
+            f"{context}: missing asset/digest evidence"
+        )
+
+
+def test_no_membership_assert_couples_to_parsed_source_version():
+    """회귀 방지: 이 파일의 어떤 테스트도 src/version.py 에서 파싱한 버전을
+    f-string 으로 보간해 문서 내용에 대한 membership(`... in doc/baseline/summary/
+    ...`)으로 단정해서는 안 된다.
+
+    그 패턴은 version-bump 봇이 버전을 bump 하는 순간(봇은 3개 버전 파일 +
+    마커만 갱신하고 문서 프로세는 안 건드림) 문서와 어긋나 pytest -q 를 깨뜨리는
+    순환 트랩이다(과거 line 805/962 사고 2건). 현재 배포 버전과의 커플링은
+    test_current_status_marker_tracks_source_version(마커==version.py) 만 트랩 없이
+    담당한다. AST 로 해당 형태의 assert 를 정적 검출한다.
+    """
+    import ast
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    # src/version.py 의 __version__ 을 파싱해 담는 변수명 수집
+    version_vars = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            call_src = ast.get_source_segment(src, node.value) or ""
+            if "__version__" in call_src:
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        version_vars.add(tgt.id)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        test = node.test
+        if not (
+            isinstance(test, ast.Compare)
+            and any(isinstance(op, ast.In) for op in test.ops)
+            and isinstance(test.left, ast.JoinedStr)
+        ):
+            continue
+        for value in test.left.values:
+            if (
+                isinstance(value, ast.FormattedValue)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in version_vars
+            ):
+                offenders.append(node.lineno)
+
+    assert not offenders, (
+        "membership assert interpolating a parsed src/version.py version found at "
+        f"lines {sorted(set(offenders))}; this recreates the version-bump CI trap. "
+        "Use test_current_status_marker_tracks_source_version or a format-only "
+        "regex check instead of interpolating the live-parsed version into an "
+        "`... in <doc section>` assertion."
+    )

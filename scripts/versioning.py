@@ -119,6 +119,58 @@ def sync_installer(installer_file: Path, new_version: str) -> None:
     installer_file.write_text(new_content, encoding='utf-8')
 
 
+_STATUS_MARKER_RE = re.compile(r'(Current shipping version:\s*`v)(\d+\.\d+\.\d+)(`)')
+
+
+def read_status_marker(status_doc: Path) -> str:
+    """current_status.md의 'Current shipping version' 마커에서 버전을 읽는다.
+
+    Args:
+        status_doc: docs/current_status.md 경로
+
+    Returns:
+        버전 문자열 (예: "2.4.2")
+
+    Raises:
+        FileNotFoundError: 파일이 존재하지 않을 때
+        ValueError: 마커를 찾을 수 없을 때
+    """
+    content = status_doc.read_text(encoding='utf-8')
+    match = _STATUS_MARKER_RE.search(content)
+    if not match:
+        raise ValueError(
+            f"'Current shipping version' 마커를 찾을 수 없습니다: {status_doc}"
+        )
+    return match.group(2)
+
+
+def sync_status_marker(status_doc: Path, new_version: str) -> None:
+    """current_status.md의 'Current shipping version' 마커를 new_version으로 교체한다.
+
+    이 마커는 봇(version-gate.yml의 version-bump 잡)이 3개 버전 파일과 함께
+    갱신하며, test_current_status_docs.py가 마커 == src/version.py 를 강제한다.
+    사람이 손으로 맞출 필요는 없다.
+
+    Args:
+        status_doc: docs/current_status.md 경로
+        new_version: 새 버전 문자열 (예: "2.4.3")
+
+    Raises:
+        FileNotFoundError: 파일이 존재하지 않을 때
+        ValueError: 마커 라인을 찾을 수 없을 때
+    """
+    content = status_doc.read_text(encoding='utf-8')
+    new_content, count = _STATUS_MARKER_RE.subn(
+        rf'\g<1>{new_version}\g<3>',
+        content,
+    )
+    if count == 0:
+        raise ValueError(
+            f"'Current shipping version' 마커를 찾을 수 없습니다: {status_doc}"
+        )
+    status_doc.write_text(new_content, encoding='utf-8')
+
+
 def bump_version(version: str, bump_type: str) -> str:
     """시맨틱 버전을 bump_type에 따라 증가시킨다.
 

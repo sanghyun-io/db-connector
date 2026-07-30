@@ -23,9 +23,11 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from versioning import (
     bump_version,
     compare_versions,
+    read_status_marker,
     read_version,
     sync_installer,
     sync_pyproject,
+    sync_status_marker,
     write_version,
 )
 
@@ -258,6 +260,59 @@ class TestSyncInstaller:
 
 
 # ─────────────────────────────────────────────
+# sync_status_marker / read_status_marker 테스트
+# ─────────────────────────────────────────────
+
+class TestStatusMarker:
+    @pytest.fixture
+    def status_doc(self, tmp_path):
+        f = tmp_path / "current_status.md"
+        f.write_text(
+            "# TunnelForge Current Status\n\n"
+            "Last reviewed: 2026-07-29\n\n"
+            "Current shipping version: `v2.4.2` <!-- managed by bot -->\n\n"
+            "## Summary\n\nbody\n",
+            encoding='utf-8',
+        )
+        return f
+
+    def test_read_marker(self, status_doc):
+        assert read_status_marker(status_doc) == "2.4.2"
+
+    def test_sync_updates_marker(self, status_doc):
+        sync_status_marker(status_doc, "2.4.3")
+        assert "Current shipping version: `v2.4.3`" in status_doc.read_text(encoding='utf-8')
+
+    def test_sync_preserves_annotation_and_body(self, status_doc):
+        sync_status_marker(status_doc, "2.5.0")
+        content = status_doc.read_text(encoding='utf-8')
+        assert "<!-- managed by bot -->" in content
+        assert "Last reviewed: 2026-07-29" in content
+        assert "## Summary" in content
+
+    def test_read_after_sync(self, status_doc):
+        sync_status_marker(status_doc, "3.0.0")
+        assert read_status_marker(status_doc) == "3.0.0"
+
+    def test_sync_does_not_duplicate(self, status_doc):
+        sync_status_marker(status_doc, "2.4.3")
+        content = status_doc.read_text(encoding='utf-8')
+        assert content.count("Current shipping version:") == 1
+
+    def test_missing_marker_raises(self, tmp_path):
+        f = tmp_path / "no_marker.md"
+        f.write_text("# Status\n\nno marker\n", encoding='utf-8')
+        with pytest.raises(ValueError, match="Current shipping version"):
+            sync_status_marker(f, "1.0.0")
+        with pytest.raises(ValueError, match="Current shipping version"):
+            read_status_marker(f)
+
+    def test_file_not_found_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            sync_status_marker(tmp_path / "nonexistent.md", "1.0.0")
+
+
+# ─────────────────────────────────────────────
 # compare_versions 테스트
 # ─────────────────────────────────────────────
 
@@ -336,10 +391,13 @@ class TestBumpVersionCLI:
         code, _, _ = self.run_cli("--bump-type", "invalid")
         assert code != 0
 
-    def test_real_bump_syncs_all_three_files(self, tmp_path):
-        """실제 bump 시 version.py / pyproject.toml / .iss 세 파일이 모두 동기화되어야 한다.
+    def test_real_bump_syncs_all_four_files(self, tmp_path):
+        """실제 bump 시 version.py / pyproject.toml / .iss / current_status.md 마커가
+        모두 동기화되어야 한다.
 
-        워크트리 실제 파일을 건드리지 않도록 임시 경로를 인자로 전달한다.
+        워크트리 실제 파일(특히 docs/current_status.md)을 건드리지 않도록 모든
+        대상 경로를 임시 파일로 전달한다. --status-doc 을 명시하지 않으면
+        기본값(docs/current_status.md)이 잡히므로 반드시 임시 경로를 넘긴다.
         """
         vf = tmp_path / "version.py"
         vf.write_text('__version__ = "2.1.0"\n', encoding='utf-8')
@@ -347,18 +405,48 @@ class TestBumpVersionCLI:
         pf.write_text('[project]\nname = "x"\nversion = "2.1.0"\n', encoding='utf-8')
         isf = tmp_path / "TunnelForge.iss"
         isf.write_text('#define MyAppVersion "2.1.0"\n', encoding='utf-8')
+        doc = tmp_path / "current_status.md"
+        doc.write_text(
+            "# Status\n\nCurrent shipping version: `v2.1.0`\n\n## Summary\n",
+            encoding='utf-8',
+        )
 
         code, stdout, stderr = self.run_cli(
             "--bump-type", "patch",
             "--version-file", str(vf),
             "--pyproject-file", str(pf),
             "--installer-file", str(isf),
+            "--status-doc", str(doc),
         )
         assert code == 0, stderr
         assert "new_version=2.1.1" in stdout
         assert '__version__ = "2.1.1"' in vf.read_text(encoding='utf-8')
         assert 'version = "2.1.1"' in pf.read_text(encoding='utf-8')
         assert '#define MyAppVersion "2.1.1"' in isf.read_text(encoding='utf-8')
+        assert "Current shipping version: `v2.1.1`" in doc.read_text(encoding='utf-8')
+
+    def test_real_bump_missing_status_marker_is_fail_soft(self, tmp_path):
+        """current_status.md 에 마커가 없어도 bump 는 실패하지 않는다(fail-soft).
+
+        마커 부재/불일치의 강제는 test_current_status_docs.py 의 coupling 테스트가
+        담당하고, bump 자체는 릴리스를 막지 않아야 한다.
+        """
+        vf = tmp_path / "version.py"
+        vf.write_text('__version__ = "3.0.0"\n', encoding='utf-8')
+        doc = tmp_path / "current_status.md"
+        doc.write_text("# Status\n\nno marker here\n", encoding='utf-8')
+
+        code, stdout, stderr = self.run_cli(
+            "--bump-type", "minor",
+            "--version-file", str(vf),
+            "--pyproject-file", str(tmp_path / "absent.toml"),
+            "--installer-file", str(tmp_path / "absent.iss"),
+            "--status-doc", str(doc),
+        )
+        assert code == 0, stderr
+        assert "new_version=3.1.0" in stdout
+        assert "건너뜀" in stderr  # WARN skip message
+        assert doc.read_text(encoding='utf-8') == "# Status\n\nno marker here\n"
 
     def test_help_exit_zero(self):
         code, _, _ = self.run_cli("--help")

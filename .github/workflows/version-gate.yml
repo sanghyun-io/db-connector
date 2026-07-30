@@ -426,21 +426,32 @@ jobs:
           set -euo pipefail
 
           git fetch --no-tags --depth=1 origin "$HEAD_SHA"
-          mkdir -p .version-bump-input/src .version-bump-input/installer
+          mkdir -p .version-bump-input/src .version-bump-input/installer .version-bump-input/docs
           cp src/version.py .version-bump-input/src/version.py
           cp pyproject.toml .version-bump-input/pyproject.toml
           cp installer/TunnelForge.iss .version-bump-input/installer/TunnelForge.iss
+          # 3개 버전 파일은 봇 소유라 base 복사 후 전면 재기록해도 안전하지만,
+          # current_status.md 는 PR 이 손으로 편집하는 문서다. base 를 복사해
+          # 덮어쓰면 PR 의 문서 편집이 사라진다. HEAD 에서 가져와 마커 라인만
+          # 바꾼다(HEAD 객체는 위 fetch 로 확보됨).
+          git show "$HEAD_SHA:docs/current_status.md" > .version-bump-input/docs/current_status.md
           python scripts/bump_version.py \
             --bump-type "$BUMP_TYPE" \
             --version-file .version-bump-input/src/version.py \
             --pyproject-file .version-bump-input/pyproject.toml \
             --installer-file .version-bump-input/installer/TunnelForge.iss \
+            --status-doc .version-bump-input/docs/current_status.md \
             > /tmp/bump.txt
           EXPECTED=$(grep 'new_version=' /tmp/bump.txt | cut -d= -f2)
           CURRENT_PY=$(git show "$HEAD_SHA:src/version.py" | grep '__version__' | cut -d'"' -f2)
           CURRENT_PROJECT=$(git show "$HEAD_SHA:pyproject.toml" | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -1)
           CURRENT_INSTALLER=$(git show "$HEAD_SHA:installer/TunnelForge.iss" | sed -n 's/^#define MyAppVersion "\([^"]*\)"/\1/p' | head -1)
-          echo "expected=$EXPECTED python=$CURRENT_PY project=$CURRENT_PROJECT installer=$CURRENT_INSTALLER"
+          # current_status.md 의 'Current shipping version' 마커(있으면). '.v' 의
+          # '.' 로 백틱을 매칭해 셸에서 백틱 커맨드치환을 피한다. 마커는 fail-soft
+          # 대상이라 비어 있어도 아래 -z 가드에 넣지 않는다(비면 skip=false 로
+          # 떨어져 bump 가 돌며 마커를 동기화 -> 자가치유).
+          CURRENT_MARKER=$(git show "$HEAD_SHA:docs/current_status.md" | sed -n 's/.*Current shipping version:[[:space:]]*.v\([0-9.]*\).*/\1/p' | head -1)
+          echo "expected=$EXPECTED python=$CURRENT_PY project=$CURRENT_PROJECT installer=$CURRENT_INSTALLER marker=$CURRENT_MARKER"
 
           if [ -z "$EXPECTED" ] || [ -z "$CURRENT_PY" ] || \
              [ -z "$CURRENT_PROJECT" ] || [ -z "$CURRENT_INSTALLER" ]; then
@@ -450,8 +461,9 @@ jobs:
 
           if [ "$CURRENT_PY" = "$EXPECTED" ] && \
              [ "$CURRENT_PROJECT" = "$EXPECTED" ] && \
-             [ "$CURRENT_INSTALLER" = "$EXPECTED" ]; then
-            echo "All PR version files match the trusted expected version. Skipping."
+             [ "$CURRENT_INSTALLER" = "$EXPECTED" ] && \
+             [ "$CURRENT_MARKER" = "$EXPECTED" ]; then
+            echo "All PR version files and the status marker match the trusted expected version. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -479,7 +491,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           export GIT_INDEX_FILE="$RUNNER_TEMP/version-bump-index"
           git read-tree "$HEAD_SHA"
-          for path in src/version.py pyproject.toml installer/TunnelForge.iss; do
+          for path in src/version.py pyproject.toml installer/TunnelForge.iss docs/current_status.md; do
             mode=$(git ls-tree "$HEAD_SHA" -- "$path" | awk '{print $1}')
             blob=$(git hash-object -w ".version-bump-input/$path")
             git update-index --add --cacheinfo "$mode,$blob,$path"
