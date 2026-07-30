@@ -426,15 +426,17 @@ jobs:
           set -euo pipefail
 
           git fetch --no-tags --depth=1 origin "$HEAD_SHA"
-          mkdir -p .version-bump-input/src .version-bump-input/installer
+          mkdir -p .version-bump-input/src .version-bump-input/installer .version-bump-input/docs
           cp src/version.py .version-bump-input/src/version.py
           cp pyproject.toml .version-bump-input/pyproject.toml
           cp installer/TunnelForge.iss .version-bump-input/installer/TunnelForge.iss
+          cp docs/current_status.md .version-bump-input/docs/current_status.md
           python scripts/bump_version.py \
             --bump-type "$BUMP_TYPE" \
             --version-file .version-bump-input/src/version.py \
             --pyproject-file .version-bump-input/pyproject.toml \
             --installer-file .version-bump-input/installer/TunnelForge.iss \
+            --status-doc .version-bump-input/docs/current_status.md \
             > /tmp/bump.txt
           EXPECTED=$(grep 'new_version=' /tmp/bump.txt | cut -d= -f2)
           CURRENT_PY=$(git show "$HEAD_SHA:src/version.py" | grep '__version__' | cut -d'"' -f2)
@@ -479,7 +481,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           export GIT_INDEX_FILE="$RUNNER_TEMP/version-bump-index"
           git read-tree "$HEAD_SHA"
-          for path in src/version.py pyproject.toml installer/TunnelForge.iss; do
+          for path in src/version.py pyproject.toml installer/TunnelForge.iss docs/current_status.md; do
             mode=$(git ls-tree "$HEAD_SHA" -- "$path" | awk '{print $1}')
             blob=$(git hash-object -w ".version-bump-input/$path")
             git update-index --add --cacheinfo "$mode,$blob,$path"

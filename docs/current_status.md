@@ -2,6 +2,8 @@
 
 Last reviewed: 2026-07-29
 
+Current shipping version: `v2.4.2` <!-- managed by scripts/bump_version.py (versioning.sync_status_marker); do not edit by hand -->
+
 This document is the current repository status index. It separates verified
 state from planning documents and lists the next actionable issues.
 
@@ -47,6 +49,18 @@ Required update fields:
 - Add command evidence in `Verification Log` when commands are run.
 - Add a short entry in `Session Log`.
 - Keep `Recommended Execution Order` aligned with open issue priority.
+
+Release bookkeeping (automated — do not hand-edit):
+
+- The `Current shipping version` marker near the top is maintained by the
+  `version-bump` bot (`scripts/bump_version.py` -> `versioning.sync_status_marker`),
+  which updates it together with the three version files. `test_current_status_docs.py`
+  enforces `marker == src/version.py`; do not edit the marker by hand.
+- After publishing a release, add its `Verification Log` publication row with
+  `python scripts/record_release.py` instead of hand-writing literals.
+  `test_current_status_docs.py` validates publication rows by *format* (PR ref,
+  run IDs, 40-hex merge commit, asset/digest evidence), so no per-release
+  hardcoded test is needed.
 
 Do not mark an issue `closed` without fresh verification evidence in the same
 session. If only focused tests passed, use `fixed_pending_full_verify`.

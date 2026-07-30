@@ -189,6 +189,22 @@ def test_version_bump_requires_real_version_files_and_pins_token_action():
     ) in bump_text
 
 
+def test_version_bump_syncs_current_status_marker():
+    """version-bump 봇은 세 버전 파일과 함께 docs/current_status.md 의 'Current
+    shipping version' 마커도 트러스티드 트리 커밋에 포함해야 한다.
+
+    이렇게 해야 가벼운 커플링(문서가 배포 버전을 추적)이 개발자 손질/트랩 없이
+    유지된다. bump_version.py 는 --status-doc 로 마커 복사본을 갱신하고, 커밋
+    루프는 docs/current_status.md 를 PR head 트리 위에 덮어써 함께 푸시한다.
+    """
+    bump_text = version_gate_job_text("version-bump")
+
+    assert "cp docs/current_status.md .version-bump-input/docs/current_status.md" in bump_text
+    assert "--status-doc .version-bump-input/docs/current_status.md" in bump_text
+    # 커밋 루프가 마커 파일을 트러스티드 트리에 포함해야 한다
+    assert "installer/TunnelForge.iss docs/current_status.md" in bump_text
+
+
 def test_release_tag_creation_is_manual_approved_and_sha_bound():
     workflow_text = CREATE_RELEASE_TAG_PATH.read_text(encoding="utf-8")
     workflow = load_workflow(CREATE_RELEASE_TAG_PATH)
