@@ -105,6 +105,14 @@ def main() -> int:
         default='installer/TunnelForge.iss',
         help='Inno Setup 스크립트 경로 (기본값: installer/TunnelForge.iss)'
     )
+    parser.add_argument(
+        '--status-doc',
+        default='docs/current_status.md',
+        help=(
+            "current_status.md 경로 ('Current shipping version' 마커 동기화 대상; "
+            '기본값: docs/current_status.md). 마커/파일이 없으면 경고 후 건너뛴다.'
+        )
+    )
 
     args = parser.parse_args()
 
@@ -115,6 +123,7 @@ def main() -> int:
     version_file = project_root / args.version_file
     pyproject_file = project_root / args.pyproject_file
     installer_file = project_root / args.installer_file
+    status_doc = project_root / args.status_doc
 
     # versioning 모듈 임포트 (scripts/ 디렉토리를 sys.path에 추가)
     sys.path.insert(0, str(script_dir))
@@ -124,6 +133,7 @@ def main() -> int:
             write_version,
             sync_pyproject,
             sync_installer,
+            sync_status_marker,
             bump_version,
         )
     except ImportError as e:
@@ -169,6 +179,18 @@ def main() -> int:
         rc = _apply_sync(sync_installer, installer_file, new_version, 'installer .iss', required=False)
         if rc is not None:
             return rc
+
+        # current_status.md 'Current shipping version' 마커 동기화.
+        # fail-soft: 파일/마커가 없어도 릴리스를 막지 않는다. 마커의 존재/일치는
+        # test_current_status_docs.py 의 coupling 테스트가 별도로 강제한다.
+        if status_doc.exists():
+            try:
+                sync_status_marker(status_doc, new_version)
+                print(f"[OK] {status_doc} 마커 업데이트 완료", file=sys.stderr)
+            except ValueError as e:
+                print(f"[WARN] {status_doc} 마커 동기화 건너뜀: {e}", file=sys.stderr)
+        else:
+            print(f"[SKIP] {status_doc} 없음, 마커 동기화 건너뜁니다.", file=sys.stderr)
 
     # $GITHUB_OUTPUT 호환 형식으로 stdout 출력
     print(f"new_version={new_version}")
