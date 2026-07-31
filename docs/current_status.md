@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-07-29
 
-Current shipping version: `v2.4.2` <!-- managed by scripts/bump_version.py (versioning.sync_status_marker); do not edit by hand -->
+Current shipping version: `v2.5.0` <!-- managed by scripts/bump_version.py (versioning.sync_status_marker); do not edit by hand -->
 
 This document is the current repository status index. It separates verified
 state from planning documents and lists the next actionable issues.

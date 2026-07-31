@@ -138,13 +138,25 @@ fn dump_import<F: FnMut(Value)>(request: &Request, mut emit: F) -> Result<Value,
             .cloned()
             .collect(),
     };
-    prepare_import_target(
+    let incompatible_surviving_fks = prepare_import_target(
         mode,
         &tables,
         &import_schema,
         &mut adapter,
         &target_schema,
     )?;
+    if !incompatible_surviving_fks.is_empty() {
+        emit(json!({
+            "event": "warning",
+            "request_id": request.request_id,
+            "phase": "dump_import_preflight",
+            "classification": "surviving_fk_incompatible",
+            "message": format!(
+                "대상에만 있는 FK가 재생성 테이블과 타입이 다릅니다(foreign_key_checks=0으로 강행): {}",
+                incompatible_surviving_fks.join(", ")
+            )
+        }));
+    }
 
     let import_result = (|| -> Result<(), String> {
         for (index, table_manifest) in tables.iter().enumerate() {
@@ -245,11 +257,15 @@ fn prepare_import_target(
     import_schema: &NormalizedSchema,
     adapter: &mut LiveAdapter,
     target_schema: &str,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if !matches!(mode, "replace" | "recreate") {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    preflight_surviving_referencing_fks(adapter, target_schema, import_schema)?;
+    // 표준 도구(mysqldump restore)처럼 foreign_key_checks=0으로 강행한다. 대상에만 있는
+    // (import set 밖) FK가 재생성 부모와 타입이 달라도 차단하지 않고, 그 목록만 반환해
+    // 호출부에서 경고로 남긴다.
+    let incompatible_fks =
+        detect_incompatible_surviving_fks(adapter, target_schema, import_schema)?;
 
     // tables는 parent-first(dependency order)이므로 rev()는 child-first가 된다.
     // foreign_key_checks=0이 이미 켜져 있어 역순 DROP은 안전하다.
@@ -258,7 +274,7 @@ fn prepare_import_target(
             .execute_sql(&drop_table_sql(adapter.engine(), &table_manifest.name))
             .map_err(|err| dump_import_ddl_error("drop_table", &table_manifest.name, &err))?;
     }
-    Ok(())
+    Ok(incompatible_fks)
 }
 
 /// 단일 테이블의 데이터를 적재한다. MySQL TSV fast-path(LOAD DATA / 병렬 / fallback)와

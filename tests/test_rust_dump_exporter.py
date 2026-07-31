@@ -248,6 +248,83 @@ class TestRustDumpExporter:
             "mysql connection error: ERROR 1045 access denied"
         )
 
+    def test_denied_privilege_extracts_backup_admin_from_marker(self):
+        from src.exporters.rust_dump_exporter import (
+            mysql_parallel_snapshot_denied_privilege,
+        )
+
+        assert (
+            mysql_parallel_snapshot_denied_privilege(
+                "Rust DB Core export 오류: "
+                "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED:"
+                "BACKUP_ADMIN:ERROR 1227"
+            )
+            == "BACKUP_ADMIN"
+        )
+
+    def test_denied_privilege_extracts_flush_or_reload_from_marker(self):
+        from src.exporters.rust_dump_exporter import (
+            mysql_parallel_snapshot_denied_privilege,
+        )
+
+        assert (
+            mysql_parallel_snapshot_denied_privilege(
+                "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED:"
+                "FLUSH_TABLES_OR_RELOAD:ERROR 1045"
+            )
+            == "FLUSH_TABLES_OR_RELOAD"
+        )
+
+    def test_denied_privilege_is_none_without_marker(self):
+        from src.exporters.rust_dump_exporter import (
+            mysql_parallel_snapshot_denied_privilege,
+        )
+
+        assert (
+            mysql_parallel_snapshot_denied_privilege(
+                "mysql connection error: ERROR 1045 access denied"
+            )
+            is None
+        )
+
+    def test_parallel_no_backup_lock_is_an_accepted_snapshot_mode(self):
+        from src.exporters.rust_dump_exporter import MYSQL_SNAPSHOT_MODES
+
+        assert "parallel_no_backup_lock" in MYSQL_SNAPSHOT_MODES
+
+    def test_export_full_schema_parallel_no_backup_lock_keeps_threads(self, tmp_path):
+        from src.exporters.rust_dump_exporter import RustDumpConfig, RustDumpExporter
+
+        class FakeFacade:
+            def run_dump(self, payload, on_event=None):
+                self.payload = payload
+                return {
+                    "success": True,
+                    "tables": 1,
+                    "rows_dumped": 2,
+                    "snapshot_policy": (
+                        "mysql_parallel_no_backup_lock_consistent_snapshot"
+                    ),
+                }
+
+        facade = FakeFacade()
+        exporter = RustDumpExporter(
+            RustDumpConfig("localhost", 3306, "root", "password"),
+            facade=facade,
+        )
+
+        success, message = exporter.export_full_schema(
+            "app",
+            str(tmp_path / "dump"),
+            threads=8,
+            mysql_snapshot_mode="parallel_no_backup_lock",
+        )
+
+        assert success is True
+        assert facade.payload["threads"] == 8
+        assert facade.payload["mysql_snapshot_mode"] == "parallel_no_backup_lock"
+        assert "락 없는 병렬" in message
+
     def test_export_full_schema_passes_zstd_compression_to_rust_dump(self, tmp_path):
         """압축 선택이 Rust dump.run payload로 전달됨"""
         from src.exporters.rust_dump_exporter import RustDumpConfig, RustDumpExporter

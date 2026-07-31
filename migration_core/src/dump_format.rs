@@ -609,23 +609,22 @@ fn incompatible_surviving_fk_offenders(
     offenders
 }
 
-/// 타겟 DB에서 import set 밖의 살아있는 referencing FK를 조회한다. 덤프가 재생성할
-/// 부모 정의와 구조적으로 호환되면 MySQL dump 복원처럼 그대로 보존하고 진행한다.
+/// 타겟 DB에서 import set 밖(대상에만 존재)의 살아있는 referencing FK 중, 덤프가 재생성할
+/// 부모 정의와 구조가 달라 호환되지 않는 것들의 목록을 반환한다.
 ///
-/// MySQL 전용. 비-MySQL 어댑터는 그대로 통과시킨다(ERROR 3780은 MySQL 고유 증상이며,
-/// PostgreSQL은 `information_schema.KEY_COLUMN_USAGE`에 `REFERENCED_TABLE_NAME`을
-/// 노출하지 않아 별도 쿼리가 필요하다 — 후속 과제).
+/// MySQL 전용. 비-MySQL 어댑터는 빈 목록으로 통과시킨다.
 ///
-/// 타겟을 수정하지 않고 오직 조회만 한다. 구조가 달라지는 FK만 어떤 테이블의 어떤
-/// 제약이 충돌하는지 명시한 `preflight_surviving_fk` 에러를 반환한다.
-pub(crate) fn preflight_surviving_referencing_fks(
+/// 타겟을 수정하지 않고 오직 조회만 한다. import은 이미 foreign_key_checks=0으로 표준
+/// 도구(mysqldump restore)처럼 강행하므로, 이 목록은 import을 차단하지 않고 호출부에서
+/// 경고로만 사용한다(대상에만 있는 FK의 정합성은 표준 도구와 마찬가지로 사용자 책임).
+pub(crate) fn detect_incompatible_surviving_fks(
     adapter: &mut LiveAdapter,
     target_schema: &str,
     import_schema: &NormalizedSchema,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let conn = match adapter {
         LiveAdapter::MySql(conn) => conn,
-        _ => return Ok(()),
+        _ => return Ok(Vec::new()),
     };
     let rows: Vec<SurvivingFkColumn> = conn
         .exec_map(
@@ -658,20 +657,7 @@ pub(crate) fn preflight_surviving_referencing_fks(
         )
         .map_err(|err| format!("mysql surviving-FK preflight inspect error: {err}"))?;
 
-    let offenders = incompatible_surviving_fk_offenders(&rows, import_schema);
-    if offenders.is_empty() {
-        Ok(())
-    } else {
-        Err(classified_import_error(
-            "preflight_surviving_fk",
-            &format!(
-                "target-only foreign keys are incompatible with tables being recreated; \
-                 align or detach only these constraints before re-importing: {}",
-                offenders.join(", ")
-            ),
-            None,
-        ))
-    }
+    Ok(incompatible_surviving_fk_offenders(&rows, import_schema))
 }
 
 pub(crate) fn validate_dump_import_manifest_strictness(

@@ -1588,12 +1588,16 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         else:
             status = "success" if self.import_success else "failed"
 
-        # 스키마 이름 추출 (폴더명에서)
+        # import "대상" 스키마명으로 파일명을 만든다.
+        # 소스 덤프 폴더명의 첫 단어(예: "PROD_root_dataflare" → "PROD")를 쓰면 소스가
+        # 대상인 것처럼 오해된다(import은 "어디에 넣었는지"가 핵심). 그래서:
+        #   - target_schema 지정 시 → 그 스키마명
+        #   - "원본 스키마명 사용" 시 → 덤프의 원본(=실제 대상) 스키마명
         schema_name = "unknown"
-        if self.last_input_dir:
-            schema_name = os.path.basename(self.last_input_dir).split('_')[0]
         if self.last_target_schema:
             schema_name = self.last_target_schema
+        elif self.last_input_dir:
+            schema_name = self._get_dump_schema_name(self.last_input_dir) or "unknown"
 
         default_filename = f"import_log_{schema_name}_{status}_{timestamp}.txt"
 

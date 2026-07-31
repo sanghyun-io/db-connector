@@ -103,6 +103,11 @@ pub struct NormalizedIndex {
     pub name: String,
     #[serde(default)]
     pub columns: Vec<String>,
+    /// columns와 병렬. 각 컬럼의 prefix 길이(MySQL `col(255)` 같은 부분 인덱스). None이면 full
+    /// 컬럼 인덱스. 구 덤프에는 이 필드가 없으므로 serde default(빈 Vec)로 역직렬화되며, 그 경우
+    /// 모든 컬럼을 full로 취급한다(구 동작과 동일).
+    #[serde(default)]
+    pub column_prefixes: Vec<Option<u32>>,
     #[serde(default)]
     pub unique: bool,
 }
@@ -711,18 +716,21 @@ fn default_snapshot_policy() -> String {
 
 pub(crate) fn dump_manifest_consistency_metadata(
     engine: &str,
-    mysql_single_connection: bool,
+    mysql_snapshot_policy: &str,
 ) -> (String, bool, Vec<String>) {
     if engine == "mysql" {
-        (
-            if mysql_single_connection {
-                "mysql_single_connection_consistent_snapshot".to_string()
-            } else {
-                "mysql_shared_consistent_snapshot".to_string()
-            },
-            true,
-            Vec::new(),
-        )
+        let backup_lock_skipped =
+            mysql_snapshot_policy == "mysql_parallel_no_backup_lock_consistent_snapshot";
+        let warnings = if backup_lock_skipped {
+            vec![
+                "LOCK INSTANCE FOR BACKUP was skipped (BACKUP_ADMIN not required); \
+                 schema DDL drift was verified after extraction instead."
+                    .to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
+        (mysql_snapshot_policy.to_string(), true, warnings)
     } else {
         ("connection_consistent".to_string(), true, Vec::new())
     }
@@ -1047,17 +1055,7 @@ mod tests {
     #[test]
     fn dump_manifest_consistency_metadata_marks_mysql_parallel_as_shared_snapshot() {
         let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("mysql", false);
-
-        assert_eq!(snapshot_policy, "mysql_shared_consistent_snapshot");
-        assert!(strict_export);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn dump_manifest_consistency_metadata_marks_single_thread_as_strict() {
-        let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("mysql", false);
+            dump_manifest_consistency_metadata("mysql", "mysql_shared_consistent_snapshot");
 
         assert_eq!(snapshot_policy, "mysql_shared_consistent_snapshot");
         assert!(strict_export);
@@ -1066,8 +1064,10 @@ mod tests {
 
     #[test]
     fn dump_manifest_consistency_metadata_marks_mysql_single_connection() {
-        let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("mysql", true);
+        let (snapshot_policy, strict_export, warnings) = dump_manifest_consistency_metadata(
+            "mysql",
+            "mysql_single_connection_consistent_snapshot",
+        );
 
         assert_eq!(
             snapshot_policy,
@@ -1078,9 +1078,28 @@ mod tests {
     }
 
     #[test]
+    fn dump_manifest_consistency_metadata_marks_parallel_no_backup_lock() {
+        let (snapshot_policy, strict_export, warnings) = dump_manifest_consistency_metadata(
+            "mysql",
+            "mysql_parallel_no_backup_lock_consistent_snapshot",
+        );
+
+        assert_eq!(
+            snapshot_policy,
+            "mysql_parallel_no_backup_lock_consistent_snapshot"
+        );
+        assert!(strict_export);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("LOCK INSTANCE FOR BACKUP"));
+        assert!(warnings[0].contains("BACKUP_ADMIN not required"));
+    }
+
+    #[test]
     fn dump_manifest_consistency_metadata_keeps_postgres_policy_separate() {
-        let (snapshot_policy, strict_export, warnings) =
-            dump_manifest_consistency_metadata("postgresql", false);
+        let (snapshot_policy, strict_export, warnings) = dump_manifest_consistency_metadata(
+            "postgresql",
+            "mysql_shared_consistent_snapshot",
+        );
 
         assert_eq!(snapshot_policy, "connection_consistent");
         assert!(strict_export);

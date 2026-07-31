@@ -244,6 +244,126 @@ def test_single_connection_failure_does_not_prompt_again(monkeypatch):
         dialog.close()
 
 
+def test_backup_admin_denial_offers_parallel_continue(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_export_dialog.check_rust_dump",
+        lambda: (True, "Rust DB Core OK"),
+    )
+    dialog = RustDumpExportDialog()
+
+    try:
+        message_box = dialog._create_mysql_privilege_dialog("BACKUP_ADMIN")
+        button_texts = {button.text() for button in message_box.buttons()}
+
+        assert button_texts == {
+            "병렬로 계속 (락 없이)",
+            "단일 연결로 계속",
+            "권한 설정 안내",
+            "취소",
+        }
+        assert message_box.defaultButton().text() == "병렬로 계속 (락 없이)"
+    finally:
+        dialog.close()
+
+
+def test_flush_reload_denial_also_offers_lock_free_parallel(monkeypatch):
+    # RDS는 FTWRL 자체가 막혀 FLUSH_TABLES_OR_RELOAD 마커가 뜨는데, lock-free 병렬 모드는
+    # FTWRL을 쓰지 않으므로 이 경우에도 병렬 계속을 제시해야 한다.
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_export_dialog.check_rust_dump",
+        lambda: (True, "Rust DB Core OK"),
+    )
+    dialog = RustDumpExportDialog()
+
+    try:
+        message_box = dialog._create_mysql_privilege_dialog("FLUSH_TABLES_OR_RELOAD")
+        button_texts = {button.text() for button in message_box.buttons()}
+
+        assert button_texts == {
+            "병렬로 계속 (락 없이)",
+            "단일 연결로 계속",
+            "권한 설정 안내",
+            "취소",
+        }
+        assert message_box.defaultButton().text() == "병렬로 계속 (락 없이)"
+    finally:
+        dialog.close()
+
+
+def test_backup_admin_failure_retries_with_parallel_no_backup_lock(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_export_dialog.check_rust_dump",
+        lambda: (True, "Rust DB Core OK"),
+    )
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_export_dialog.QMessageBox.warning",
+        lambda *_args: pytest.fail("privilege failure must offer parallel fallback"),
+    )
+    dialog = RustDumpExportDialog()
+    worker = MagicMock()
+    worker.isRunning.return_value = False
+    dialog.export_schema = "app"
+    dialog.input_output_dir.setText("C:/tmp/tunnelforge-export")
+    dialog._prompt_mysql_privilege_action = MagicMock(
+        return_value="parallel_no_backup_lock"
+    )
+    dialog._build_worker = MagicMock(return_value=worker)
+    dialog._start_export_worker = MagicMock()
+    dialog._report_error_anonymously = MagicMock()
+
+    try:
+        dialog.on_finished(
+            False,
+            "Rust DB Core export 오류: "
+            "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED:"
+            "BACKUP_ADMIN:ERROR 1227",
+        )
+
+        dialog._prompt_mysql_privilege_action.assert_called_once_with("BACKUP_ADMIN")
+        dialog._build_worker.assert_called_once_with(
+            "app",
+            "C:/tmp/tunnelforge-export",
+            mysql_snapshot_mode="parallel_no_backup_lock",
+        )
+        dialog._start_export_worker.assert_called_once_with(worker)
+        dialog._report_error_anonymously.assert_not_called()
+        assert dialog._mysql_no_backup_lock_fallback is True
+    finally:
+        dialog.worker = None
+        dialog.close()
+
+
+def test_parallel_no_backup_lock_failure_does_not_prompt_again(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_export_dialog.check_rust_dump",
+        lambda: (True, "Rust DB Core OK"),
+    )
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_export_dialog.QMessageBox.warning",
+        lambda *_args: None,
+    )
+    dialog = RustDumpExportDialog()
+    dialog._mysql_no_backup_lock_fallback = True
+    dialog._prompt_mysql_privilege_action = MagicMock()
+    dialog._report_error_anonymously = MagicMock()
+
+    try:
+        dialog.on_finished(
+            False,
+            "MYSQL_PARALLEL_SNAPSHOT_PRIVILEGE_REQUIRED:"
+            "BACKUP_ADMIN:ERROR 1227",
+        )
+
+        dialog._prompt_mysql_privilege_action.assert_not_called()
+        dialog._report_error_anonymously.assert_called_once()
+    finally:
+        dialog.close()
+
+
 def test_rust_dump_export_dialog_rejects_parent_manual_folder(tmp_path):
     app = QApplication.instance() or QApplication([])
     config_manager = MagicMock()

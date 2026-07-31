@@ -54,6 +54,8 @@ _EN_TEXT_TRANSLATIONS = {
     "병렬 Export 권한 필요": "Parallel Export Privileges Required",
     "병렬 Export에 필요한 MySQL 권한이 없습니다.\n\n권한 없이 단일 연결로 안전하게 Export할 수 있지만 병렬 처리는 사용되지 않습니다.": "The required MySQL privileges for parallel export are not available.\n\nYou can safely export without these privileges using a single connection, but parallel processing will be disabled.",
     "병렬 일관 스냅샷에는 다음 전역 권한이 필요합니다.\n\n• FLUSH_TABLES 또는 RELOAD\n• BACKUP_ADMIN\n\nDBA에게 해당 권한을 요청한 뒤 Export를 다시 실행하세요.": "A parallel consistent snapshot requires the following global privileges:\n\n• FLUSH_TABLES or RELOAD\n• BACKUP_ADMIN\n\nAsk your DBA to grant these privileges, then run the export again.",
+    "병렬 Export에 필요한 락 권한이 없습니다.\n\n락 없이 각 워커가 독립 스냅샷으로 병렬 Export할 수 있습니다. 속도는 유지되며, 워커 간 스냅샷 시점이 미세하게 달라질 수 있어 덤프 후 스키마 변경(DDL) 여부를 검사해 무결성을 확인합니다.": "The lock privileges required for parallel export are not available.\n\nEach worker can still export in parallel using an independent snapshot without locks. Speed is preserved; because snapshot timing can differ slightly between workers, schema changes (DDL) after the dump are checked to verify integrity.",
+    "락 없는 병렬 스냅샷으로 다시 시도 중...": "Retrying with a lock-free parallel snapshot...",
     "보관 기간 (일):": "Retention period (days):",
     "결과 보관 기간 (일):": "Result retention period (days):",
     "분:": "Minute:",
