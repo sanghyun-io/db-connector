@@ -141,12 +141,17 @@ Focused/full Rust tests, focused Python Import tests, and the optimized Core
 build pass. A clean 185-table live restore and a terminal monolithic Python
 suite remain before closure.
 
-TF-STATUS-099 is `in_progress`. Patch release `v2.5.1` packages the
-TF-STATUS-098 Rust Core schema-fidelity fix and the durable executed-mode Import
-log summary. All official version sources are aligned at `2.5.1`; protected PR
-checks, exact-main tag creation, the separately approved multi-platform release
-build, asset digest inspection, stable publication, and updater visibility are
-the remaining release gates.
+The stable/latest `v2.5.1` release packages the TF-STATUS-098 Rust Core
+schema-fidelity fix and the durable executed-mode Import log summary. Protected
+PR #257 passed hosted Python, Rust Core, version, support-tracking, and
+internal/external macOS arm64/x86_64 gates before merging at exact main commit
+`97c1c1479b8b24deea89b27f01cae1ee3a930471`. Approved tag run
+`30601333778` created annotated `v2.5.1` at that commit, and approved release
+run `30601400813` built and verified Windows plus unsigned macOS arm64/x86_64
+artifacts. All 10 assets expose GitHub SHA-256 digests, all four macOS
+sidecars match, and the live updater reports `2.5.1` without error.
+TF-STATUS-099 is `closed`; TF-STATUS-098 remains
+`fixed_pending_full_verify` for the clean 185-table live restore.
 
 The `2.3.1` release candidate now contains the completed release-trust scope:
 GitHub Release asset `digest` verification prevents unverified downloaded
@@ -790,7 +795,8 @@ Commands run locally:
 
 | Date | Scope | Command | Result | Notes |
 | --- | --- | --- | --- | --- |
-| 2026-07-31 | TF-STATUS-099 `v2.5.1` local release-candidate gate | `.venv\Scripts\python.exe scripts\bump_version.py --bump-type patch`; UTF-8 focused Import/exporter/status/version pytest; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; compileall; `git diff --check` | PASS: `new_version=2.5.1`; 249 Python tests; Rust 232 unit + 2 JSONL CLI + 10 live-configurable + 2 stress / 1 manual stress ignored; optimized build, compile, and diff check | A larger local Python command that included the macOS packaging support module was non-terminal beyond five minutes in the known `check-macos-support-gate.py --final --skip-github` subprocess and was stopped explicitly. No failure output was emitted from that attempt. Hosted `python-regression` remains a mandatory merge gate; release remains gated on protected PR CI, exact-current-main tag creation, approved multi-platform build, asset/digest inspection, stable publication, and updater visibility. |
+| 2026-07-31 | `v2.5.1` protected publication closure / TF-STATUS-099 | PR #257 protected checks and merge; approved `create-release-tag.yml` run `30601333778`; approved `release.yml` run `30601400813`; annotated-tag object/peeled-commit inspection; draft asset/digest and checksum-sidecar inspection; stable/latest publication and live `UpdateChecker` | PR runs `30600955343` and `30600955319` passed the required Python, Rust Core, version, support-tracking, and internal/external macOS arm64/x86_64 gates; merge commit `97c1c1479b8b24deea89b27f01cae1ee3a930471`; tag peels to that exact commit; release run built and verified Windows plus unsigned macOS arm64/x86_64 artifacts; all 10 release assets have GitHub SHA-256 digests and all four macOS sidecars match | `v2.5.1` is stable/latest at `https://github.com/sanghyun-io/tunnelforge/releases/tag/v2.5.1`. TF-STATUS-099 is closed. |
+| 2026-07-31 | TF-STATUS-099 `v2.5.1` local release-candidate gate | `.venv\Scripts\python.exe scripts\bump_version.py --bump-type patch`; UTF-8 focused Import/exporter/status/version pytest; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; compileall; `git diff --check` | PASS: `new_version=2.5.1`; 249 Python tests; Rust 232 unit + 2 JSONL CLI + 10 live-configurable + 2 stress / 1 manual stress ignored; optimized build, compile, and diff check | A larger local Python command that included the macOS packaging support module was non-terminal beyond five minutes in the known `check-macos-support-gate.py --final --skip-github` subprocess and was stopped explicitly. No failure output was emitted from that attempt. Hosted `python-regression` remains a mandatory merge gate; release remains gated on protected PR CI, exact-current-main tag creation, approved multi-platform build, asset/digest inspection, stable activation, and updater visibility. |
 | 2026-07-31 | TF-STATUS-098 fractional temporal default and durable Import-mode summary | TDD RED/GREEN: `cargo test --manifest-path migration_core\Cargo.toml generate_table_ddl_preserves_mysql_fractional_current_timestamp_default --lib -- --nocapture`; unsafe temporal-expression regression; saved-log executed-mode regression; `cargo test --manifest-path migration_core\Cargo.toml`; `.venv\Scripts\python.exe -m pytest tests\test_db_import_dialog.py tests\test_rust_dump_exporter.py -q`; Python compile; `cargo build --manifest-path migration_core\Cargo.toml --release`; `git diff --check` | PASS: RED reproduced quoted `CURRENT_TIMESTAMP(6)` and missing summary mode; GREEN Rust 232 unit + 2 JSONL CLI + 10 live-configurable + 2 stress passed / 1 manual stress ignored; focused Python 112 passed; compile, release build, and diff check passed | Safe temporal expressions retain only bounded 0-6 fractional precision; malformed suffixes remain quoted. Saved logs report the actual Core mode from the run rather than the current radio state. The user confirmed the failed run was `replace`; no target DB was mutated during this implementation session. |
 | 2026-07-31 | TF-STATUS-098 monolithic Python attempt | `$env:QT_QPA_PLATFORM='offscreen'; .venv\Scripts\python.exe -m pytest -q` | NON-TERMINAL after more than five minutes; stopped explicitly | No pytest failure output was emitted. The retained process tree showed the suite inside a macOS support-gate test with two `tunnelforge-core.exe` children and a `check-macos-support-gate.py --final --skip-github` subprocess. Only that verified test process tree was terminated; the optimized Core build then passed cleanly. This row is not a full-suite pass claim. |
 | 2026-07-31 | TF-STATUS-098 status handoff contract | `.venv\Scripts\python.exe -m pytest tests\test_current_status_docs.py -q`; `git diff --check` | PASS: 76 tests; diff check exit 0 | The canonical handoff records the first/root DDL failure, confirmed replace mode, partial-target warning, focused fix, remaining live/full-suite gaps, issue tracker row, verification evidence, execution priority, and session entry. |
@@ -2718,7 +2724,7 @@ Next action:
 
 ### TF-STATUS-099: `v2.5.1` Import Patch Publication
 
-Status: `in_progress`
+Status: `closed`
 Severity: High
 Area: Release readiness / `2.5.1` publication
 
@@ -2738,13 +2744,29 @@ Evidence:
   diff checks passed before versioning. The monolithic local Python run was
   non-terminal rather than passing or failing, so hosted `python-regression`
   remains a mandatory merge gate.
+- GitHub Actions was unexpectedly disabled at repository level during PR
+  creation, so no checks could start. It was re-enabled with the repository's
+  existing `allowed_actions: all` policy; PR #257 was reopened through the
+  workflow's declared trigger and no required check was bypassed.
+- PR runs `30600955343` and `30600955319` passed hosted full Python, Rust Core,
+  version, support-tracking, and both internal/external macOS arm64/x86_64
+  checks. PR #257 merged as exact current-main commit
+  `97c1c1479b8b24deea89b27f01cae1ee3a930471`.
+- Approved run `30601333778` created annotated tag `v2.5.1`, whose tag object
+  peels to that exact merge commit. Approved run `30601400813` passed tag
+  preflight, Windows installer/WebSetup, unsigned macOS arm64/x86_64 builds and
+  smoke tests, release artifact normalization, and draft creation.
+- The stable/latest release contains exactly 10 uploaded assets, each with a
+  GitHub SHA-256 digest. All four macOS checksum sidecars match their
+  corresponding DMG/ZIP digests, and live `UpdateChecker` returned latest
+  `2.5.1`, the stable release URL, and no error.
 
 Next action:
 
-1. Pass all protected PR checks, merge without bypass, and create annotated
-   `v2.5.1` at the exact merge commit.
-2. Run the approved release workflow, verify all expected asset digests and
-   macOS checksum sidecars, publish stable/latest, and verify the updater.
+1. Keep `v2.5.1` stable/latest and retain the protected PR, exact-main tag,
+   separate approvals, asset/digest verification, and updater evidence.
+2. Keep TF-STATUS-098 open until a clean 185-table live restore and Import
+   report/row-count verification pass.
 
 ## Issue Tracker
 
@@ -2848,13 +2870,13 @@ Next action:
 | TF-STATUS-096 | High | fixed_pending_full_verify | Rust Core dump.run / Export UI | Privilege-aware one-connection fallback implemented; live limited-account/provider proof remains | Run disposable limited-account/provider UI coverage and obtain a terminal clean full-Python result |
 | TF-STATUS-097 | High | closed | Release readiness / `2.4.2` publication | MySQL Export privilege fallback required protected patch publication | Keep `v2.4.2` stable/latest and retain exact-main protected release evidence |
 | TF-STATUS-098 | High | fixed_pending_full_verify | Rust Core dump.import / MySQL schema fidelity / Import logs | Fractional temporal default and missing durable mode summary fixed; live full restore remains | Rerun a clean 185-table restore, verify the report/row counts, and obtain a terminal full-Python result |
-| TF-STATUS-099 | High | in_progress | Release readiness / `2.5.1` publication | Import schema-fidelity and durable-mode logging fix requires protected patch publication | Pass protected PR/tag/release gates, verify assets and digests, publish stable/latest, and verify updater visibility |
+| TF-STATUS-099 | High | closed | Release readiness / `2.5.1` publication | Import schema-fidelity and durable-mode logging patch published through protected gates | Keep `v2.5.1` stable/latest and retain exact-main tag, approvals, asset digests, and updater evidence |
 
 ## Recommended Execution Order
 
-1. Finish TF-STATUS-099 through protected PR, exact-main annotated tag,
-   separately approved multi-platform build, asset/digest inspection, stable
-   publication, and updater visibility.
+1. Keep TF-STATUS-099 closed by preserving PR #257 hosted gates, the exact-main
+   annotated `v2.5.1` tag, separate protected approvals, all 10 asset digests,
+   matching macOS sidecars, stable/latest state, and updater visibility.
 2. Finish TF-STATUS-098 verification before using this restore. Package the
    corrected Core, rerun into a disposable or freshly cleared target, require
    all 185 table row-count checks and the Import report to pass, and obtain a
@@ -2929,6 +2951,7 @@ Next action:
 
 | Date | Session Summary | Files Touched | Verification |
 | --- | --- | --- | --- |
+| 2026-07-31 | Published `v2.5.1` as stable/latest and closed TF-STATUS-099 after the complete protected PR, exact-main tag, separately approved multi-platform build, asset inspection, and updater verification sequence. Repository Actions had been disabled before PR checks; it was re-enabled under the retained allowed-actions policy and all declared checks ran without bypass. | PR #257, tag `v2.5.1`, release workflow/metadata, repository Actions setting, canonical status | Runs `30600955343` and `30600955319` passed; merge commit `97c1c1479b8b24deea89b27f01cae1ee3a930471`; tag run `30601333778` and release run `30601400813` passed; 10/10 assets have GitHub digests and four macOS sidecars match; public latest and `UpdateChecker` return `2.5.1`. |
 | 2026-07-31 | Started TF-STATUS-099 protected `v2.5.1` patch publication for the fractional temporal-default Import fix and durable executed-mode log summary. Created a dedicated agent branch, synchronized all official version sources, and completed the bounded local release-candidate gate. | `src/version.py`, `pyproject.toml`, `installer/TunnelForge.iss`, implementation/tests, canonical status | `scripts/bump_version.py --bump-type patch` reported `new_version=2.5.1`; focused Python 249, full Cargo, optimized Core build, compile, and diff check passed. The macOS-support packaging module reproduced the known Windows non-terminal subprocess pattern, so hosted full Python and all protected publication gates remain mandatory. |
 | 2026-07-31 | Implemented the focused TF-STATUS-098 fix on the current `v2.5.0` main baseline. Rust Core now emits fractional `CURRENT_TIMESTAMP(6)` as a temporal expression under a bounded injection-safe grammar, and saved Import logs include the actual executed mode in the durable summary even if the detailed log header ages out. User confirmation establishes that the failed production-shaped run used destructive `replace` mode. | `migration_core/src/ddl.rs`, `src/ui/dialogs/db_import_dialog.py`, focused Rust/Python tests, canonical status | TDD RED/GREEN; full Cargo gate passed at 232 unit + 2 CLI + 10 live-configurable + 2 stress / 1 ignored; focused Python 112 passed; compile, optimized build, and diff check passed. Monolithic Python was non-terminal after five minutes at a macOS support-gate subprocess and is not claimed as passing; clean live 185-table restore remains. |
 | 2026-07-31 | Investigated a real 185-table MySQL Import failure and opened TF-STATUS-098. The strict dump is intact, but Rust Core turns `CURRENT_TIMESTAMP(6)` into the quoted string default `'CURRENT_TIMESTAMP(6)'`; MySQL rejects the first affected table with ERROR 1067 and the UI propagates that operation error to the remaining 13 tables. The failed target is not a complete restore. | `docs/current_status.md`; read-only external Import log and dump manifest inspection | Confirmed from the exact manifest value and DDL-rendering control flow; 171/185 tables completed before the first error, no `_tunnelforge_import_report.json` exists, and no target DB connection or mutation was performed during diagnosis. |
