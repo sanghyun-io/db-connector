@@ -1446,6 +1446,81 @@ def test_import_save_log_escapes_result_controls(tmp_path, monkeypatch):
     dialog.close()
 
 
+def test_import_save_log_summary_records_executed_replace_mode(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+
+    class FakeSignal:
+        def connect(self, _callback):
+            pass
+
+    class FakeWorker:
+        progress = FakeSignal()
+        table_progress = FakeSignal()
+        detail_progress = FakeSignal()
+        table_status = FakeSignal()
+        raw_output = FakeSignal()
+        import_finished = FakeSignal()
+        finished = FakeSignal()
+        metadata_analyzed = FakeSignal()
+        table_chunk_progress = FakeSignal()
+
+        def __init__(self, task_type, config, **kwargs):
+            self.task_type = task_type
+            self.config = config
+            self.kwargs = kwargs
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+    class FakeConnector:
+        host = "127.0.0.1"
+        port = 3306
+        user = "root"
+        password = "pw"
+        engine = "mysql"
+
+        def get_schemas(self):
+            return ["grireport"]
+
+    dump_dir = tmp_path / "dump"
+    dump_dir.mkdir()
+    output_path = tmp_path / "import-log.txt"
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_import_dialog.check_rust_dump",
+        lambda: (True, "Rust DB Core OK"),
+    )
+    monkeypatch.setattr("src.ui.dialogs.db_import_dialog.RustDumpWorker", FakeWorker)
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_import_dialog.QFileDialog.getSaveFileName",
+        lambda *_args: (str(output_path), ""),
+    )
+    monkeypatch.setattr(
+        "src.ui.dialogs.db_import_dialog.QMessageBox.information",
+        lambda *_args: None,
+    )
+
+    dialog = RustDumpImportDialog(
+        connector=FakeConnector(),
+        tunnel_config={"environment": "development"},
+    )
+    dialog.input_dir.setText(str(dump_dir))
+    dialog.radio_tz_none.setChecked(True)
+    dialog.radio_replace.setChecked(True)
+
+    dialog.do_import()
+    dialog.radio_merge.setChecked(True)
+    dialog.import_success = False
+    dialog.save_log()
+
+    saved_summary = output_path.read_text(encoding="utf-8").split("상세 로그", 1)[0]
+    assert "Import 모드: 전체 교체 Import" in saved_summary
+    assert "Import 모드: 증분 Import (병합)" not in saved_summary
+    dialog.deleteLater()
+
+
 def test_import_cancellation_does_not_start_error_reporting(monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(

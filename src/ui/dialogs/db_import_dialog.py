@@ -333,6 +333,7 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         self.table_items: dict = {}  # 테이블명 -> QListWidgetItem 매핑
         self.last_input_dir: str = ""  # 마지막 사용한 input_dir
         self.last_target_schema: str = ""  # 마지막 사용한 target_schema
+        self.last_import_mode: str = ""  # 마지막 실행에서 Core에 전달한 import mode
 
         # 로그 수집용 변수
         self.log_entries: List[str] = []
@@ -986,13 +987,21 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
             logger.debug("Failed to read dump schema name from %s", dump_dir, exc_info=True)
             return ""
 
-    def _get_import_mode_text(self) -> str:
-        """현재 선택된 Import 모드 텍스트 반환"""
+    def _get_selected_import_mode(self) -> str:
         if self.radio_replace.isChecked():
-            return "전체 교체 Import"
-        elif self.radio_recreate.isChecked():
-            return "완전 재생성 Import"
-        return "증분 Import (병합)"
+            return "replace"
+        if self.radio_recreate.isChecked():
+            return "recreate"
+        return "merge"
+
+    def _get_import_mode_text(self, import_mode: Optional[str] = None) -> str:
+        """선택했거나 실제 실행한 Import 모드의 표시 텍스트 반환"""
+        mode = import_mode or self._get_selected_import_mode()
+        return {
+            "merge": "증분 Import (병합)",
+            "replace": "전체 교체 Import",
+            "recreate": "완전 재생성 Import",
+        }.get(mode, "확인 불가")
 
     def _confirm_production_guard(self, input_dir: str, target_schema: Optional[str]) -> bool:
         from src.core.production_guard import ProductionGuard
@@ -1039,6 +1048,8 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
         # 저장 (재시도용)
         self.last_input_dir = input_dir
         self.last_target_schema = target_schema
+        import_mode = "merge" if retry_tables else self._get_selected_import_mode()
+        self.last_import_mode = import_mode
         if self.config_manager:
             self.config_manager.set_app_setting('rust_dump_import_dir', input_dir)
             self.config_manager.set_app_setting('rust_dump_last_dump_dir', input_dir)
@@ -1074,20 +1085,13 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
             self.import_end_time = None
             self.import_success = None
 
-            # Import 모드 결정
-            import_mode_str = "증분 Import (병합)"
-            if self.radio_replace.isChecked():
-                import_mode_str = "전체 교체 Import"
-            elif self.radio_recreate.isChecked():
-                import_mode_str = "완전 재생성 Import"
-
             # 로그 헤더 추가
             self._add_log(f"{'='*60}")
             self._add_log("Rust DB Core Import 시작")
             self._add_log(f"시작 시간: {self.import_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
             self._add_log(f"Dump 폴더: {input_dir}")
             self._add_log(f"대상 스키마: {target_schema if target_schema else '원본 스키마명 사용'}")
-            self._add_log(f"Import 모드: {import_mode_str}")
+            self._add_log(f"Import 모드: {self._get_import_mode_text(import_mode)}")
             self._add_log(f"병렬 스레드: {self.spin_threads.value()}")
             self._add_log(f"{'='*60}")
 
@@ -1130,17 +1134,9 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
             timezone_sql = resolve_timezone_sql(db_engine, "utc")
             self.txt_log.addItem("ℹ️ 타임존을 강제로 '+00:00' (UTC)로 설정합니다.")
 
-        # Import 모드 결정
-        import_mode = "merge"  # 기본값
-        if self.radio_replace.isChecked():
-            import_mode = "replace"
-        elif self.radio_recreate.isChecked():
-            import_mode = "recreate"
-
         # 재시도 시 모드 표시
         if retry_tables:
             self.txt_log.addItem(f"🔄 재시도 모드: {len(retry_tables)}개 테이블")
-            import_mode = "merge"  # 재시도 시에는 병합 모드 사용
 
         # 작업 스레드 시작
         self.worker = RustDumpWorker(
@@ -1636,6 +1632,12 @@ class RustDumpImportDialog(CollapsibleConfigDialog, ErrorReportingMixin, QDialog
                     else '원본 스키마명 사용'
                 )
                 f.write(f"대상 스키마: {target_schema}\n")
+                import_mode = (
+                    self._get_import_mode_text(self.last_import_mode)
+                    if self.last_import_mode
+                    else '확인 불가'
+                )
+                f.write(f"Import 모드: {safe(import_mode)}\n")
                 if self.import_success is None:
                     result_label = "진행 중"
                 else:

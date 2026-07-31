@@ -1271,10 +1271,9 @@ fn map_default_literal(target: &str, default_value: &str, source_type: &str) -> 
             return "0".to_string();
         }
     }
-    if matches!(
-        upper.as_str(),
-        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "TRUE" | "FALSE"
-    ) || value.parse::<f64>().is_ok()
+    if is_safe_temporal_default_expression(&upper)
+        || matches!(upper.as_str(), "TRUE" | "FALSE")
+        || value.parse::<f64>().is_ok()
     {
         if target == "mysql" && upper == "TRUE" {
             return "1".to_string();
@@ -1304,6 +1303,34 @@ fn map_default_literal(target: &str, default_value: &str, source_type: &str) -> 
         value.to_string()
     };
     format!("'{}'", inner.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn is_safe_temporal_default_expression(value: &str) -> bool {
+    if matches!(
+        value,
+        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME"
+    ) {
+        return true;
+    }
+    if value == "CURRENT_DATE()" {
+        return true;
+    }
+    for function in ["CURRENT_TIMESTAMP", "CURRENT_TIME"] {
+        let Some(arguments) = value.strip_prefix(function) else {
+            continue;
+        };
+        if arguments == "()" {
+            return true;
+        }
+        if arguments.len() == 3
+            && arguments.starts_with('(')
+            && arguments.ends_with(')')
+            && matches!(arguments.as_bytes()[1], b'0'..=b'6')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn strip_postgresql_type_cast(value: &str) -> &str {
@@ -2583,6 +2610,51 @@ mod tests {
             bad_bit.starts_with('\'') && bad_bit.ends_with('\''),
             "{bad_bit}"
         );
+    }
+
+    #[test]
+    fn generate_table_ddl_preserves_mysql_fractional_current_timestamp_default() {
+        let table = NormalizedTable {
+            name: "dm_data_phase".to_string(),
+            columns: vec![NormalizedColumn {
+                name: "created_at".to_string(),
+                type_name: "timestamp(6)".to_string(),
+                default_value: Some("CURRENT_TIMESTAMP(6)".to_string()),
+                nullable: false,
+                primary_key: false,
+                unique: false,
+            }],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            table_collation: None,
+        };
+
+        let ddl = generate_table_ddl(&table, "mysql", "mysql").expect("valid MySQL DDL");
+
+        assert!(
+            ddl.contains("`created_at` timestamp(6) DEFAULT CURRENT_TIMESTAMP(6) NOT NULL"),
+            "fractional temporal default must remain an expression: {ddl}"
+        );
+        assert!(
+            !ddl.contains("'CURRENT_TIMESTAMP(6)'"),
+            "fractional temporal default must not become a string literal: {ddl}"
+        );
+    }
+
+    #[test]
+    fn map_default_literal_keeps_unsafe_temporal_expressions_quoted() {
+        for value in [
+            "CURRENT_TIMESTAMP(7)",
+            "CURRENT_TIMESTAMP(06)",
+            "CURRENT_TIMESTAMP(-1)",
+            "CURRENT_TIMESTAMP(6); DROP TABLE users",
+        ] {
+            let mapped = map_default_literal("mysql", value, "timestamp(6)");
+            assert!(
+                mapped.starts_with('\'') && mapped.ends_with('\''),
+                "unsafe temporal expression must remain a string literal: {value:?} -> {mapped}"
+            );
+        }
     }
 
     #[test]
