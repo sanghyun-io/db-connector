@@ -1,8 +1,8 @@
 # TunnelForge Current Status
 
-Last reviewed: 2026-07-29
+Last reviewed: 2026-07-31
 
-Current shipping version: `v2.5.0` <!-- managed by scripts/bump_version.py (versioning.sync_status_marker); do not edit by hand -->
+Current shipping version: `v2.5.1` <!-- managed by scripts/bump_version.py (versioning.sync_status_marker); do not edit by hand -->
 
 This document is the current repository status index. It separates verified
 state from planning documents and lists the next actionable issues.
@@ -122,6 +122,31 @@ run `30419463951` built and verified Windows plus unsigned macOS arm64/x86_64
 artifacts. All 10 release assets expose GitHub SHA-256 digests, the four macOS
 sidecars match their corresponding DMG/ZIP asset digests, and the live updater
 reports `2.4.2` without error. TF-STATUS-097 is `closed`.
+
+TF-STATUS-098 is `fixed_pending_full_verify`. A real 185-table MySQL Import
+using confirmed `replace` mode stopped after 171
+tables because the dump schema preserved a valid fractional temporal default
+as `CURRENT_TIMESTAMP(6)`, while Rust Core's default renderer recognizes only
+the exact unqualified token `CURRENT_TIMESTAMP`. It therefore generated
+`DEFAULT 'CURRENT_TIMESTAMP(6)'` for `dm_data_phase.created_at`; MySQL rejected
+that quoted string as ERROR 1067. The other 13 reported table failures are the
+remaining dependency-ordered tables after that first DDL failure, not 13
+independent root causes. In replace/recreate mode all selected target tables
+are dropped before loading begins, so the failed target must be treated as
+partial and must not be used as a complete restore. Rust Core now preserves
+safe fractional temporal defaults with precision 0-6 while keeping malformed
+expressions quoted, and saved Import-log summaries persist the actual Core mode
+even when the detailed 500-entry ring buffer loses its initial header.
+Focused/full Rust tests, focused Python Import tests, and the optimized Core
+build pass. A clean 185-table live restore and a terminal monolithic Python
+suite remain before closure.
+
+TF-STATUS-099 is `in_progress`. Patch release `v2.5.1` packages the
+TF-STATUS-098 Rust Core schema-fidelity fix and the durable executed-mode Import
+log summary. All official version sources are aligned at `2.5.1`; protected PR
+checks, exact-main tag creation, the separately approved multi-platform release
+build, asset digest inspection, stable publication, and updater visibility are
+the remaining release gates.
 
 The `2.3.1` release candidate now contains the completed release-trust scope:
 GitHub Release asset `digest` verification prevents unverified downloaded
@@ -765,6 +790,11 @@ Commands run locally:
 
 | Date | Scope | Command | Result | Notes |
 | --- | --- | --- | --- | --- |
+| 2026-07-31 | TF-STATUS-099 `v2.5.1` local release-candidate gate | `.venv\Scripts\python.exe scripts\bump_version.py --bump-type patch`; UTF-8 focused Import/exporter/status/version pytest; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; compileall; `git diff --check` | PASS: `new_version=2.5.1`; 249 Python tests; Rust 232 unit + 2 JSONL CLI + 10 live-configurable + 2 stress / 1 manual stress ignored; optimized build, compile, and diff check | A larger local Python command that included the macOS packaging support module was non-terminal beyond five minutes in the known `check-macos-support-gate.py --final --skip-github` subprocess and was stopped explicitly. No failure output was emitted from that attempt. Hosted `python-regression` remains a mandatory merge gate; release remains gated on protected PR CI, exact-current-main tag creation, approved multi-platform build, asset/digest inspection, stable publication, and updater visibility. |
+| 2026-07-31 | TF-STATUS-098 fractional temporal default and durable Import-mode summary | TDD RED/GREEN: `cargo test --manifest-path migration_core\Cargo.toml generate_table_ddl_preserves_mysql_fractional_current_timestamp_default --lib -- --nocapture`; unsafe temporal-expression regression; saved-log executed-mode regression; `cargo test --manifest-path migration_core\Cargo.toml`; `.venv\Scripts\python.exe -m pytest tests\test_db_import_dialog.py tests\test_rust_dump_exporter.py -q`; Python compile; `cargo build --manifest-path migration_core\Cargo.toml --release`; `git diff --check` | PASS: RED reproduced quoted `CURRENT_TIMESTAMP(6)` and missing summary mode; GREEN Rust 232 unit + 2 JSONL CLI + 10 live-configurable + 2 stress passed / 1 manual stress ignored; focused Python 112 passed; compile, release build, and diff check passed | Safe temporal expressions retain only bounded 0-6 fractional precision; malformed suffixes remain quoted. Saved logs report the actual Core mode from the run rather than the current radio state. The user confirmed the failed run was `replace`; no target DB was mutated during this implementation session. |
+| 2026-07-31 | TF-STATUS-098 monolithic Python attempt | `$env:QT_QPA_PLATFORM='offscreen'; .venv\Scripts\python.exe -m pytest -q` | NON-TERMINAL after more than five minutes; stopped explicitly | No pytest failure output was emitted. The retained process tree showed the suite inside a macOS support-gate test with two `tunnelforge-core.exe` children and a `check-macos-support-gate.py --final --skip-github` subprocess. Only that verified test process tree was terminated; the optimized Core build then passed cleanly. This row is not a full-suite pass claim. |
+| 2026-07-31 | TF-STATUS-098 status handoff contract | `.venv\Scripts\python.exe -m pytest tests\test_current_status_docs.py -q`; `git diff --check` | PASS: 76 tests; diff check exit 0 | The canonical handoff records the first/root DDL failure, confirmed replace mode, partial-target warning, focused fix, remaining live/full-suite gaps, issue tracker row, verification evidence, execution priority, and session entry. |
+| 2026-07-31 | TF-STATUS-098 real MySQL Import failure investigation | Numbered inspection of `import_log_grireport_failed_20260731_104324.txt`; parsed `_tunnelforge_dump.json`; source trace through `dump_import`, `generate_table_ddl`, `default_clause`, `map_default_literal`, and MySQL import session tuning; dump-directory/import-report inspection | CONFIRMED Rust Core DDL rendering defect; no target DB connection or mutation performed | The manifest preserves `timestamp(6) DEFAULT CURRENT_TIMESTAMP(6)`, but the renderer recognizes only exact `CURRENT_TIMESTAMP` and emits the invalid quoted default `DEFAULT 'CURRENT_TIMESTAMP(6)'`. MySQL ERROR 1067 at `dm_data_phase` is the first/root failure; the other 13 rows repeat that operation failure. The dump has 185 tables and about 621 MB across 620 files; no success report exists. A replace/recreate target is partial because all selected tables are dropped before sequential create/load. |
 | 2026-07-29 | `v2.4.2` protected publication closure / TF-STATUS-097 | PR #253 protected checks and merge; approved `create-release-tag.yml` run `30419408852`; approved `release.yml` run `30419463951`; annotated tag peel; draft asset/digest and macOS sidecar inspection; stable/latest publication; live `UpdateChecker` | PR runs `30418651877` and `30418651961` passed full Python, Rust Core, version, support-tracking, and internal/external macOS arm64/x86_64 gates; merge commit `1d9305c826f11ebe6c808ec501953ed1339152d9`; tag peels to that exact commit; release run passed Windows and unsigned macOS builds plus artifact verification; 10/10 assets have GitHub digests; four macOS sidecars match; public updater returned `2.4.2` with no error | `v2.4.2` is stable/latest at `https://github.com/sanghyun-io/tunnelforge/releases/tag/v2.4.2`. TF-STATUS-097 is closed. TF-STATUS-096 remains `fixed_pending_full_verify` only for a disposable live limited-account/provider proof. |
 | 2026-07-29 | `2.4.2` local release-candidate gate / TF-STATUS-097 | `scripts/bump_version.py --bump-type patch`; focused Export/UI/i18n/status/version-sync pytest command; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; `git diff --check`; clean monolithic `.venv\Scripts\python.exe -m pytest -q` attempt | Version sources aligned at `2.4.2`; focused Python 174 passed; Cargo 228 unit + 2 JSONL CLI + 10 live-configurable + 2 stress passed / 1 manual stress ignored; release build and diff check passed; monolithic Windows pytest remained non-terminal after five minutes | The earlier apparent stop at a config backup test was not reproducible: that test passed alone and all 60 config-manager tests passed together. Local publication uses the same split-gate precedent as `v2.4.1`; the protected GitHub `python-regression` full-suite job remains mandatory and will block merge on any real failure. |
 | 2026-07-29 | TF-STATUS-096 privilege-aware parallel Export fallback implementation | TDD-focused Rust/Python/UI tests; `.venv\Scripts\python.exe -m pytest tests\test_rust_dump_exporter.py tests\test_rust_dump_worker.py tests\test_db_export_dialog.py tests\test_i18n.py tests\test_current_status_docs.py -q`; `cargo test --manifest-path migration_core\Cargo.toml`; `cargo build --manifest-path migration_core\Cargo.toml --release`; monolithic `.venv\Scripts\python.exe -m pytest -q`; `cargo fmt --manifest-path migration_core\Cargo.toml -- --check` | Focused Python 173 passed; Cargo 228 unit + 2 JSONL CLI + 10 live-configurable + 2 stress passed / 1 manual stress ignored; release build passed; monolithic Python timed out after 10 minutes without a terminal result; fmt check reports repository-wide pre-existing format drift | Stable marker handling is limited to MySQL access-denial codes 1045/1142/1227; real lock timeout remains distinct. Single-connection mode uses one `REPEATABLE READ`, read-only consistent snapshot with no global/backup lock, forces one worker, and re-inspects selected schema for DDL drift. UI shows recommended continuation, exact privilege guidance, or cancel and does not re-prompt if fallback itself fails. No production DB mutation or live limited-account verification was performed. |
@@ -2534,7 +2564,7 @@ Next action:
 
 ### TF-STATUS-096: MySQL Export Backup-Privilege Compatibility and Diagnostics
 
-Status: `open`
+Status: `fixed_pending_full_verify`
 Severity: High
 Area: Rust Core dump.run / Export UI
 
@@ -2626,6 +2656,95 @@ Next action:
 1. Keep `v2.4.2` stable/latest and retain the protected PR, exact-main tag,
    separate approval, asset digest, and updater verification sequence for later
    releases.
+
+### TF-STATUS-098: Fractional `CURRENT_TIMESTAMP` Import DDL Is Quoted
+
+Status: `fixed_pending_full_verify`
+Severity: High
+Area: Rust Core dump.import / MySQL schema fidelity
+
+Evidence:
+
+- The real Import log records 185 tables total, 171 completed, and the first
+  failure at `dm_data_phase` table creation with MySQL ERROR 1067:
+  `Invalid default value for 'created_at'`.
+- The user confirmed that this execution used `전체 교체 Import` (`replace`).
+  Rust Core dropped all 185 selected target tables before the create/load loop,
+  then stopped after 171 completed tables; post-load indexes/FKs did not run.
+- The strict dump manifest contains
+  `created_at timestamp(6) DEFAULT CURRENT_TIMESTAMP(6)` for
+  `dm_data_phase`; three later tables also use the same fractional temporal
+  default.
+- `map_default_literal` treats only the exact tokens `CURRENT_TIMESTAMP`,
+  `CURRENT_DATE`, and `CURRENT_TIME` as expressions. `CURRENT_TIMESTAMP(6)`
+  falls through to the string-literal path, so `generate_table_ddl` produces
+  `created_at timestamp(6) DEFAULT 'CURRENT_TIMESTAMP(6)' NOT NULL`.
+- Import session setup already removes strict and zero-date SQL modes before
+  table creation. The observed error is therefore caused by the quoted
+  expression generated by TunnelForge, not by the target session's
+  `sql_mode`.
+- Import is dependency ordered and stops on the first table DDL error. The UI
+  then marks the remaining 14 table entries with that same operation error;
+  they are not 14 distinct schema defects.
+- No success report was written. Replace/recreate drops every selected target
+  table before the create/load loop, so a target used with either mode is left
+  with only the tables completed before the failure and must be considered
+  incomplete.
+- TDD now covers the exact failing schema. `generate_table_ddl` preserves
+  `CURRENT_TIMESTAMP(6)` as an expression, and the safe parser accepts only
+  unqualified temporal keywords, empty parentheses, or one precision digit
+  from 0 through 6. Precision 7, multiple digits, negative precision, and SQL
+  suffixes remain quoted as string data.
+- `RustDumpImportDialog` stores the actual mode sent to Core, including the
+  forced `merge` mode used by failed-table retry, and writes it in the saved
+  log's durable summary. This remains available even after the detailed log's
+  bounded 500-entry buffer drops the initial run header.
+- Fresh verification passed all 232 Rust unit tests, 2 JSONL CLI tests, 10
+  live-configurable test cases, and 2 stress tests with 1 manual stress test
+  ignored; the live-configurable cases had no configured DB endpoint. The
+  focused Python Import/dialog bridge gate passed 112 tests, Python compile and
+  diff checks passed, and the optimized Rust build completed.
+- The monolithic Python suite did not return within five minutes and was
+  stopped while a macOS support-gate subprocess was active. This is recorded as
+  a verification gap rather than a passing or failing test result.
+
+Next action:
+
+1. Rebuild/package the corrected application and rerun the dump into a
+   disposable or freshly cleared target, then require the Import report and all
+   185 table row-count checks to pass before using the restored database.
+2. Obtain a terminal monolithic Python result in a clean process. Close the
+   issue only after both the live restore and broader Python verification pass.
+
+### TF-STATUS-099: `v2.5.1` Import Patch Publication
+
+Status: `in_progress`
+Severity: High
+Area: Release readiness / `2.5.1` publication
+
+Evidence:
+
+- `scripts/bump_version.py --bump-type patch` advanced `src/version.py`,
+  `pyproject.toml`, `installer/TunnelForge.iss`, and the managed status marker
+  from `2.5.0` to `2.5.1`.
+- The release scope is limited to TF-STATUS-098: safe fractional MySQL temporal
+  defaults, durable executed Import mode in saved logs, focused regression
+  coverage, and canonical status evidence.
+- Release trust requires a protected PR with all hosted gates passing, an
+  annotated tag created at exact current `main` through the protected
+  environment, and a separately approved release workflow that builds and
+  verifies Windows plus unsigned macOS arm64/x86_64 artifacts.
+- Local focused/full Rust, focused Python, optimized Core build, compile, and
+  diff checks passed before versioning. The monolithic local Python run was
+  non-terminal rather than passing or failing, so hosted `python-regression`
+  remains a mandatory merge gate.
+
+Next action:
+
+1. Pass all protected PR checks, merge without bypass, and create annotated
+   `v2.5.1` at the exact merge commit.
+2. Run the approved release workflow, verify all expected asset digests and
+   macOS checksum sidecars, publish stable/latest, and verify the updater.
 
 ## Issue Tracker
 
@@ -2728,14 +2847,23 @@ Next action:
 | TF-STATUS-095 | High | closed | Release readiness / `2.4.1` publication | MySQL shared-snapshot and dump-scoped import fixes required protected publication | Keep `v2.4.1` stable/latest and retain protected release gates |
 | TF-STATUS-096 | High | fixed_pending_full_verify | Rust Core dump.run / Export UI | Privilege-aware one-connection fallback implemented; live limited-account/provider proof remains | Run disposable limited-account/provider UI coverage and obtain a terminal clean full-Python result |
 | TF-STATUS-097 | High | closed | Release readiness / `2.4.2` publication | MySQL Export privilege fallback required protected patch publication | Keep `v2.4.2` stable/latest and retain exact-main protected release evidence |
+| TF-STATUS-098 | High | fixed_pending_full_verify | Rust Core dump.import / MySQL schema fidelity / Import logs | Fractional temporal default and missing durable mode summary fixed; live full restore remains | Rerun a clean 185-table restore, verify the report/row counts, and obtain a terminal full-Python result |
+| TF-STATUS-099 | High | in_progress | Release readiness / `2.5.1` publication | Import schema-fidelity and durable-mode logging fix requires protected patch publication | Pass protected PR/tag/release gates, verify assets and digests, publish stable/latest, and verify updater visibility |
 
 ## Recommended Execution Order
 
-1. Finish TF-STATUS-096 verification with a disposable limited-account/provider
+1. Finish TF-STATUS-099 through protected PR, exact-main annotated tag,
+   separately approved multi-platform build, asset/digest inspection, stable
+   publication, and updater visibility.
+2. Finish TF-STATUS-098 verification before using this restore. Package the
+   corrected Core, rerun into a disposable or freshly cleared target, require
+   all 185 table row-count checks and the Import report to pass, and obtain a
+   terminal monolithic Python result.
+3. Finish TF-STATUS-096 verification with a disposable limited-account/provider
    UI run and a terminal clean full-Python result. Preserve explicit opt-in,
    schema-drift rejection, and the distinction between access denial and lock
    timeout.
-2. Keep TF-STATUS-097 closed by preserving the protected `v2.4.2` PR,
+3. Keep TF-STATUS-097 closed by preserving the protected `v2.4.2` PR,
    exact-main tag, approved build, 10-asset digest verification, and updater
    evidence.
 3. Keep TF-STATUS-094/095 closed by preserving compatible target-only FK
@@ -2801,6 +2929,9 @@ Next action:
 
 | Date | Session Summary | Files Touched | Verification |
 | --- | --- | --- | --- |
+| 2026-07-31 | Started TF-STATUS-099 protected `v2.5.1` patch publication for the fractional temporal-default Import fix and durable executed-mode log summary. Created a dedicated agent branch, synchronized all official version sources, and completed the bounded local release-candidate gate. | `src/version.py`, `pyproject.toml`, `installer/TunnelForge.iss`, implementation/tests, canonical status | `scripts/bump_version.py --bump-type patch` reported `new_version=2.5.1`; focused Python 249, full Cargo, optimized Core build, compile, and diff check passed. The macOS-support packaging module reproduced the known Windows non-terminal subprocess pattern, so hosted full Python and all protected publication gates remain mandatory. |
+| 2026-07-31 | Implemented the focused TF-STATUS-098 fix on the current `v2.5.0` main baseline. Rust Core now emits fractional `CURRENT_TIMESTAMP(6)` as a temporal expression under a bounded injection-safe grammar, and saved Import logs include the actual executed mode in the durable summary even if the detailed log header ages out. User confirmation establishes that the failed production-shaped run used destructive `replace` mode. | `migration_core/src/ddl.rs`, `src/ui/dialogs/db_import_dialog.py`, focused Rust/Python tests, canonical status | TDD RED/GREEN; full Cargo gate passed at 232 unit + 2 CLI + 10 live-configurable + 2 stress / 1 ignored; focused Python 112 passed; compile, optimized build, and diff check passed. Monolithic Python was non-terminal after five minutes at a macOS support-gate subprocess and is not claimed as passing; clean live 185-table restore remains. |
+| 2026-07-31 | Investigated a real 185-table MySQL Import failure and opened TF-STATUS-098. The strict dump is intact, but Rust Core turns `CURRENT_TIMESTAMP(6)` into the quoted string default `'CURRENT_TIMESTAMP(6)'`; MySQL rejects the first affected table with ERROR 1067 and the UI propagates that operation error to the remaining 13 tables. The failed target is not a complete restore. | `docs/current_status.md`; read-only external Import log and dump manifest inspection | Confirmed from the exact manifest value and DDL-rendering control flow; 171/185 tables completed before the first error, no `_tunnelforge_import_report.json` exists, and no target DB connection or mutation was performed during diagnosis. |
 | 2026-07-29 | Published `v2.4.2` as stable/latest and closed TF-STATUS-097 after the complete protected PR, exact-main tag, approved multi-platform build, asset inspection, and updater verification sequence. | PR #253, tag `v2.4.2`, release workflow/metadata, canonical status | Runs `30418651877` and `30418651961` passed; merge commit `1d9305c826f11ebe6c808ec501953ed1339152d9`; tag run `30419408852` and release run `30419463951` passed; 10/10 assets have GitHub digests and four macOS sidecars match; public latest and `UpdateChecker` return `2.4.2`. |
 | 2026-07-29 | Started the protected `v2.4.2` patch publication for TF-STATUS-096 and opened TF-STATUS-097. Synchronized the application, package, and installer versions and prepared the release candidate on a dedicated agent branch. | `src/version.py`, `pyproject.toml`, `installer/TunnelForge.iss`, canonical status | `scripts/bump_version.py --bump-type patch` reported `new_version=2.4.2`; focused Python 174, Cargo full, optimized build, and diff check passed. The clean monolithic Windows pytest remained non-terminal after five minutes, while the suspect test passed alone and its 60-test module passed; mandatory hosted full Python and protected publication gates remain |
 | 2026-07-29 | Implemented TF-STATUS-096. Strict parallel MySQL Export now identifies access-denied backup-lock failures, and the UI offers explicit recommended one-connection continuation, privilege guidance, or cancel. The fallback uses one read-only consistent-snapshot connection, forces one worker, records distinct manifest metadata, and rejects schema drift. It does not silently downgrade or re-prompt after a fallback failure. | Rust `dump.run`/manifest metadata, Python exporter/worker, Export dialog, legacy i18n, focused tests, design/plan docs, canonical status | TDD RED/GREEN; focused Python/UI/i18n/status 173 passed; complete Cargo test and release build passed; monolithic Python exceeded ten minutes without a terminal result; repository-wide fmt check exposed pre-existing drift; no production DB mutation or live limited-account/provider claim |
